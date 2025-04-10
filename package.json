@@ -1,0 +1,21 @@
+{
+  "private": true,
+  "type": "module",
+  "name": "aterbot",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "tsx ./src/index.ts",
+    "dev": "node --inspect --loader tsx ./src/index.ts"
+  },
+  "dependencies": {
+    "minecraft-data": "^3.68.0",
+    "mineflayer": "^4.20.1",
+    "mineflayer-pathfinder": "^2.4.5",
+    "tsx": "^4.17.0"
+  },
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}
