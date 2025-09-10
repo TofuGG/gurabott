@@ -2,7 +2,7 @@
   "client": {
     "host": "SERVER_ADDRESS",
     "port": "IP_ADDRESS",
-    "username": "USERNAME"
+    "username": "USERNAME",
     "version": "1.21.8"
   },
   "logLevel": [
