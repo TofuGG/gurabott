@@ -1,4 +1,5 @@
-import Mineflayer from 'mineflayer';
+import mineflayer from 'mineflayer';
+import { patchBotForForge } from 'mineflayer-forge';
 import { sleep, getRandom } from "./utils.ts";
 import CONFIG from "../config.json" assert { type: 'json' };
 import pathfinder from 'mineflayer-pathfinder';
@@ -23,11 +24,15 @@ const reconnect = async (): Promise<void> => {
 };
 
 const createBot = (): void => {
-    bot = Mineflayer.createBot({
+    bot = mineflayer.createBot({
         host: CONFIG.client.host,
         port: +CONFIG.client.port,
-        username: CONFIG.client.username
-    } as const);
+        username: CONFIG.client.username,
+        version: false, // Let it auto-detect or specify like "1.12.2"
+        forge: true     // This tells it to connect as Forge client
+    });
+    
+    patchBotForForge(bot); // Patch the bot after creation    
 
     bot.once('error', (error) => {
         console.error(`Gura got an error: ${error}`);
@@ -77,7 +82,9 @@ const createBot = (): void => {
             else
                 bot.chat(`I have ${bot.inventory.items().length} items`);
         } else if (command === 'ginvsee'){
-
+            /*tells what she has {item} x{ammount} listing every item like this:
+              "1. Watermelon x4
+               2. dirt x6"*/
             if (items.length === 0)
                 bot.chat('I have nothing');
             else {
@@ -85,6 +92,7 @@ const createBot = (): void => {
                 bot.chat(output);
             }
         } else if (command === 'geat'){
+            //eats the first item in the inventory or says "im full" if she is already full
             if (bot.food === 20){
                 bot.chat("I'm full");
             } else {
@@ -179,7 +187,7 @@ const createBot = (): void => {
     });
 
     bot.once('login', () => {
-        bot.chat(`/login SuckMyDick30697`);
+        bot.chat(`password`);
         setTimeout(() => bot.chat(`Hewwo! Same desu~`), 1690);
         console.log(`AFKBot logged in ${bot.username}\n`);
         bot.setMaxListeners(35); // or any number greater than your current number of listeners

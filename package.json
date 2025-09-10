@@ -1,25 +1,22 @@
 {
   "private": true,
   "type": "module",
-  "name": "aterbot",
-  "version": "0.0.0",
+  "name": "gurabot",
+  "version": "1.0.0",
   "scripts": {
-    "start": "tsx ./src/index.ts",
+    "start": "NODE_OPTIONS='--max-old-space-size=2048' tsx ./src/index.ts",
     "dev": "node --inspect --loader tsx ./src/index.ts"
   },
   "dependencies": {
-    "minecraft-data": "^3.68.0",
-    "mineflayer": "^4.20.1",
+    "minecraft-data": "^3.97.0",
+    "minecraft-protocol": "^1.61.0",
+    "mineflayer": "^4.32.0",
     "mineflayer-pathfinder": "^2.4.5",
-    "tsx": "^4.17.0"
+    "tsx": "^4.20.5"
   },
   "main": "index.js",
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": ""
-}
-"scripts": {
-  "start": "ts-node src/index.ts",
-  "build": "tsc"
 }
