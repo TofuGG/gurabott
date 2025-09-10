@@ -8,12 +8,6 @@
     const { pathfinder, Movements, goals } = pathfinderLib;
     const { GoalFollow } = goals;
 
-
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
     let bot: Mineflayer.Bot;
     let following = false;
     let lastPlayerJoined: string | null = null;
@@ -37,11 +31,17 @@
     }
     };
 
-    function startCommandLine(bot: Mineflayer.Bot, rl: readline.Interface) {
-        rl.on('line', (input) => {
-            handleCommand(input, bot);
+    function startCommandLine(bot: any, rl: readline.Interface) {
+        rl.on('line', (line) => {
+            const [cmd, ...args] = line.trim().split(/\s+/);
+            if (cmd === 'gsay') {
+                const msg = args.join(' ');
+                bot.chat(msg);
+            }
+            
         });
     }
+
 
 
 
@@ -360,12 +360,15 @@
                 }
                 break;
 
+
             case 'gkill':
-                bot.chat(`Shutting down...`);
-                await sleep(1000);
-                disconnect();
-                process.exit(0);
+                bot.chat('Shutting down...');
+                await sleep(500);
+                bot.quit();        // disconnect from server
+                rl.close();        // stop listening for stdin
+                process.exit(0);   // fully exit the Node process
                 break;
+                            
 
 
 
@@ -446,7 +449,7 @@
         bot.once('spawn', () => {
             console.log(`Logged in as ${bot.username}`);
             bot.pathfinder.setMovements(new Movements(bot));
-            startCommandLine(bot, rl);
+            //startCommandLine(bot, rl);
 
 
             const changePos = async (): Promise<void> => {
