@@ -267,34 +267,7 @@
                 bot.pathfinder.setMovements(new Movements(bot));
                 bot.pathfinder.setGoal(new GoalFollow(playerEntity, 1), true);
                 break;
-
-
-            /*case 'gcraft': {
-                const itemName = args[0];
-                if (!itemName) {
-                    bot.chat('Usage: gcraft <item_name>');
-                    break;
-                }
-                const mcData = minecraftData(bot.version);
-                const item = mcData.itemsByName[itemName];
-                if (!item) {
-                    bot.chat(`Unknown item: ${itemName}`);
-                    break;
-                }
-                const recipe = bot.recipesAll(item.id, null, 1)[0];
-                if (!recipe) {
-                    bot.chat(`No recipe found for ${itemName}`);
-                    break;
-                }
-                try {
-                    await bot.craft(recipe, 1, null);
-                    bot.chat(`Crafted 1 ${itemName}`);
-                } catch (e: any) {
-                    bot.chat(`Failed to craft: ${e.message}`);
-                }
-                break;
-                }*/
-
+                
             case 'gcraft': {
                 const itemName = args[0];
                 if (!itemName) {
