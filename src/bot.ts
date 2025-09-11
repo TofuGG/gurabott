@@ -90,14 +90,14 @@
                     `>>gtp: teleport to a location if permitted.`,
                     `>>gfollow <player>: follow a player.`,
                     `>>gcraft <item_name>: craft an item if recipe exists.`,
-                    //`>>gstop: disconnect the bot.`,
+
                     `>>gdump: drop all items from inventory.`,
                     `>>gkill: disconnect and exit the process.`,
                     `>>glast: show the last player who joined.`,
                     `>>gsfollow: stop following the current player.`
                 ];
                 for (const line of helpMessages) {
-                    await sleep(getRandomDelay(700, 1200)); // longer delay
+                    await sleep(getRandomDelay(700, 1200)); 
                     try {
                         bot.chat(line);
                     } catch (err) {
@@ -132,7 +132,6 @@
                     if (items.length === 0) {
                         bot.chat("I don't have any food to eat!");
                     } else {
-                        // List all food items with numbers
                         const foodList = items.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join('\n');
                         bot.chat(foodList);
                         bot.chat('Usage: geat <food_number> <amount>');
@@ -150,7 +149,7 @@
                         bot.activateItem();
                         eaten++;
                         food.count--;
-                        await sleep(500); // simulate eating delay
+                        await sleep(500); 
                         if (bot.food === 20) {
                             bot.chat("Now I'm full!");
                             break;
