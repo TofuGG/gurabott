@@ -12,8 +12,8 @@
     let following = false;
     let lastPlayerJoined: string | null = null;
     let loop: NodeJS.Timeout;
-    const DEFAULT_RETRY_DELAY = 5000;
     let currentConfig: { ip: string; port: number; username: string; version: string } | null = null;
+    let rlInstance: readline.Interface | null = null;
 
 
     const disconnect = (): void => {
@@ -27,7 +27,7 @@
     disconnect();
     await sleep(CONFIG.action.retryDelay);
     if (currentConfig) {
-        createBot(currentConfig, rl);
+        createBot(currentConfig, rlInstance!);
     }
     };
 
@@ -90,11 +90,11 @@
                     `>>gtp: teleport to a location if permitted.`,
                     `>>gfollow <player>: follow a player.`,
                     `>>gcraft <item_name>: craft an item if recipe exists.`,
-                    `>>gstop: disconnect the bot.`,
+                    //`>>gstop: disconnect the bot.`,
                     `>>gdump: drop all items from inventory.`,
                     `>>gkill: disconnect and exit the process.`,
                     `>>glast: show the last player who joined.`,
-                    `>>gstopfollow: stop following the current player.`
+                    `>>gsfollow: stop following the current player.`
                 ];
                 for (const line of helpMessages) {
                     await sleep(getRandomDelay(700, 1200)); // longer delay
@@ -167,7 +167,7 @@
                     bot.setControlState('jump', true);
                     await sleep(500);
                     bot.setControlState('jump', false);
-                    if (i < jumpAmount - 1) await sleep(500);
+                    if (i < jumpAmount - 1) await sleep(250);
                 }
                 break;
 
@@ -341,11 +341,11 @@
                 }
 
 
-            case 'gstop':
+            /*case 'gstop':
                 bot.chat(`Disconnecting...`);
                 await sleep(1000);
                 disconnect();
-                break;
+                break;*/
 
 
             case 'gdump':
@@ -365,7 +365,7 @@
                 bot.chat('Shutting down...');
                 await sleep(500);
                 bot.quit();        // disconnect from server
-                rl.close();        // stop listening for stdin
+                rlInstance?.close();     // stop listening for stdin
                 process.exit(0);   // fully exit the Node process
                 break;
                             
@@ -382,7 +382,7 @@
 
 
 
-            case 'gstopfollow':
+            case 'gsfollow':
                 if (following) {
                     following = false;
                     bot.pathfinder.setGoal(null);
@@ -404,11 +404,12 @@
         config: { ip: string; port: number; username: string; version: string },
         rl: readline.Interface
         ): void => {
+        rlInstance = rl;
         bot = Mineflayer.createBot({
-        host: config.ip,
-        port: config.port,
-        username: config.username,
-        version: config.version
+            host: config.ip,
+            port: config.port,
+            username: config.username,
+            version: config.version
         });
 
         bot.loadPlugin(pathfinder);
@@ -430,6 +431,24 @@
             console.error('Logged in when kicked?:', loggedIn);
         });
 
+        bot.on('entityHurt', (entity) => {
+            if (entity === bot.entity) {
+                //const cause = bot.damageCause ?? 'unknown reason';
+                bot.chat(`Ouch! I took damage.`);
+            }
+        });
+
+        bot.on('entityHurt', (entity) => {
+            if (entity === bot.entity) {
+                const velY = bot.entity.velocity?.y ?? 0;
+                if (velY < -0.5) {
+                    bot.chat("Oof! I think I fell too hard!");
+                }
+            }
+        });
+
+
+
 
         bot.on('end', (reason) => {
             console.log('Connection ended (Mineflayer):', reason);
@@ -450,6 +469,45 @@
             console.log(`Logged in as ${bot.username}`);
             bot.pathfinder.setMovements(new Movements(bot));
             //startCommandLine(bot, rl);
+
+            setInterval(() => {
+                if (!bot.entity) return; // safety check
+                const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                if (headBlock && headBlock.name.includes('water')) {
+                    bot.chat("Glub glub... I'm underwater!");
+                }
+            }, 2000);
+
+            // Auto-swim up & move to land when in water
+            setInterval(() => {
+                if (!bot.entity || !bot.entity.position) return;
+
+                const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
+
+                const isInWater = headBlock?.name.includes("water") || feetBlock?.name.includes("water");
+
+                if (isInWater) {
+                    // Swim upwards
+                    bot.setControlState("jump", true);
+                    bot.setControlState("forward", true);
+
+                    // Try to move toward nearest non-water block (land)
+                    const ground = bot.findBlock({
+                        matching: (block) => !block.name.includes("water") && block.boundingBox === "block",
+                        maxDistance: 20
+                    });
+
+                    if (ground) {
+                        bot.lookAt(ground.position.offset(0.5, 0.5, 0.5));
+                    }
+                } else {
+                    // Not in water -> stop swimming
+                    bot.setControlState("jump", false);
+                    bot.setControlState("forward", false);
+                }
+            }, 1000);
+
 
 
             const changePos = async (): Promise<void> => {
@@ -487,6 +545,21 @@
                 setTimeout(() => bot.chat(getRandom(messages)), 1000);
             });
         });
+
+        bot.on('entityHurt', (entity) => {
+            if (entity === bot.entity) {
+                // Find nearest attacking entity
+                const nearby = Object.values(bot.entities).find(e =>
+                    e.position.distanceTo(bot.entity.position) < 4 &&
+                    e.type === 'mob'
+                );
+                if (nearby) {
+                    bot.chat(`Help! ${nearby.name} is attacking me!`);
+                }
+            }
+        });
+
+
 
 
         bot.once('login', () => {
