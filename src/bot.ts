@@ -90,7 +90,6 @@
                     `>>gtp: teleport to a location if permitted.`,
                     `>>gfollow <player>: follow a player.`,
                     `>>gcraft <item_name>: craft an item if recipe exists.`,
-
                     `>>gdump: drop all items from inventory.`,
                     `>>gkill: disconnect and exit the process.`,
                     `>>glast: show the last player who joined.`,
@@ -251,7 +250,6 @@
                     break;
                 }
 
-                // If the player types "gfollow me", use the sender's username
                 if (targetName.toLowerCase() === 'me') {
                     targetName = username;
                 }
@@ -312,14 +310,6 @@
                 break;
                 }
 
-
-            /*case 'gstop':
-                bot.chat(`Disconnecting...`);
-                await sleep(1000);
-                disconnect();
-                break;*/
-
-
             case 'gdump':
                 if (items.length === 0) {
                     bot.chat('I have nothing to drop!');
@@ -336,9 +326,9 @@
             case 'gkill':
                 bot.chat('Shutting down...');
                 await sleep(500);
-                bot.quit();        // disconnect from server
-                rlInstance?.close();     // stop listening for stdin
-                process.exit(0);   // fully exit the Node process
+                bot.quit();      
+                rlInstance?.close();   
+                process.exit(0); 
                 break;
                             
 
@@ -393,10 +383,6 @@
             console.error('Gura network error:', err);
         });
 
-        /*bot.on('kicked', (rawResponse) => {
-            //console.error(`\n\nGura is disconnected: ${rawResponse}`);
-            console.error('Kicked:', reason, 'Logged in?', loggedIn);
-        });*/
         bot.on('kicked', (reason, loggedIn) => {
             console.error('\n\nGura is disconnected by server.');
             console.error('Kick reason (raw):', reason);
@@ -405,7 +391,7 @@
 
         bot.on('entityHurt', (entity) => {
             if (entity === bot.entity) {
-                //const cause = bot.damageCause ?? 'unknown reason';
+                
                 bot.chat(`Ouch! I took damage.`);
             }
         });
@@ -424,7 +410,7 @@
 
         bot.on('end', (reason) => {
             console.log('Connection ended (Mineflayer):', reason);
-            reconnect();   // or use setTimeout(reconnect, delay)
+            reconnect();   
         });
 
 
@@ -440,10 +426,9 @@
         bot.once('spawn', () => {
             console.log(`Logged in as ${bot.username}`);
             bot.pathfinder.setMovements(new Movements(bot));
-            //startCommandLine(bot, rl);
 
             setInterval(() => {
-                if (!bot.entity) return; // safety check
+                if (!bot.entity) return; 
                 const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
                 if (headBlock && headBlock.name.includes('water')) {
                     bot.chat("Glub glub... I'm underwater!");
@@ -498,7 +483,7 @@
             };
 
             loop = setInterval(() => {
-                if (!following) {  // <-- ADD THIS CHECK
+                if (!following) { 
                 changeView();
                 changePos();
                 }
@@ -520,7 +505,6 @@
 
         bot.on('entityHurt', (entity) => {
             if (entity === bot.entity) {
-                // Find nearest attacking entity
                 const nearby = Object.values(bot.entities).find(e =>
                     e.position.distanceTo(bot.entity.position) < 4 &&
                     e.type === 'mob'
@@ -545,3 +529,5 @@
         });
 
     };
+
+/*wood collection*/
