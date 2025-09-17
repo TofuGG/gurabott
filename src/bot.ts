@@ -14,6 +14,8 @@ let lastPlayerJoined: string | null = null;
 let loop: NodeJS.Timeout;
 let currentConfig: { ip: string; port: number; username: string; version: string } | null = null;
 let rlInstance: readline.Interface | null = null;
+let collecting = false;
+let collectedSummary: { [key: string]: number } = {};
 
 const disconnect = (): void => {
     clearInterval(loop);
@@ -46,8 +48,8 @@ const items = bot.inventory.items();
 }
 
 function clearAllControls(bot: Mineflayer.Bot) {
-const controls: Mineflayer.ControlState[] = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'];
-for (const c of controls) bot.setControlState(c, false);
+    const controls: Mineflayer.ControlState[] = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'];
+    for (const c of controls) bot.setControlState(c, false);
 }
 
 function getRandomDelay(min: number, max: number): number {
@@ -55,8 +57,9 @@ function getRandomDelay(min: number, max: number): number {
 }
 
 const handleChatCommand = async (username: string, rawMessage: string) => {
-    const items = bot.inventory?.items?.() ?? [];
-    const args = rawMessage.trim().split(' ');
+    if (!bot || !bot.inventory) return;
+    const items = bot.inventory.items?.() ?? [];
+    const args = rawMessage?.trim().split(' ') ?? [];
     const command = args.shift()?.toLowerCase();
 
     if (!command) return;
@@ -84,9 +87,10 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 `>>gfollow <player>: follow a player.`,
                 `>>gcraft <item_name>: craft an item if recipe exists.`,
                 `>>gdump: drop all items from inventory.`,
-                `>>gkill: disconnect and exit the process.`,
+                `>>gkill <mob|player name>: attack a nearby hostile mob or player using the best axe (if available), else best sword, else hand.`,
                 `>>glast: show the last player who joined.`,
-                `>>gsfollow: stop following the current player.`
+                `>>gsfollow: stop following the current player.`,
+                `>>gcollect <wood|stone|dirt> <amount>: collect a specific amount of the given resource type using the best tool available.`
             ];
             for (const line of helpMessages) {
                 await sleep(getRandomDelay(700, 1200)); 
@@ -97,6 +101,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 }
             }
             break;
+
 
         case 'gsay':
             if (args.length === 0) {
@@ -111,10 +116,10 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             break;
 
         case 'ginvsee':
-            if (items.length === 0) {
+            if (!items || items.length === 0) {
                 bot.chat('I have nothing');
             } else {
-                const output = items.map((item, index) => `${index + 1}. ${item.name} x${item.count}`).join('\n');
+                const output = items.map((item, index) => `${index + 1}. ${item.name ?? 'unknown'} x${item.count ?? 0}`).join('\n');
                 bot.chat(output);
             }
             break;
@@ -264,8 +269,13 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 bot.chat('Usage: gcraft <item_name>');
                 break;
             }
-
-            const mcData = minecraftData(bot.version);
+            let mcData: ReturnType<typeof minecraftData>;
+            try {
+                mcData = minecraftData(bot.version);
+            } catch (e) {
+                bot.chat("Failed to load Minecraft data.");
+                break;
+            }
             const item = mcData.itemsByName[itemName];
             if (!item) {
                 bot.chat(`Unknown item: ${itemName}`);
@@ -299,8 +309,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 bot.chat(`Failed to craft ${itemName}: ${err.message}`);
             }
             break;
-            }
-
+        }
         case 'gdump':
             if (items.length === 0) {
                 bot.chat('I have nothing to drop!');
@@ -313,13 +322,77 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             }
             break;
 
-        case 'gkill':
-            bot.chat('Shutting down...');
-            await sleep(500);
-            bot.quit();      
-            rlInstance?.close();   
-            process.exit(0); 
+        case 'gkill': {
+            const targetName = args[0]?.toLowerCase();
+            if (!targetName) {
+                bot.chat('Usage: gkill <mob|player name>');
+                break;
+            }
+            let mcData: ReturnType<typeof minecraftData>;
+            try {
+                mcData = minecraftData(bot.version);
+            } catch (e) {
+                bot.chat("Failed to load Minecraft data.");
+                break;
+            }
+
+            function getBestWeapon() {
+                const priorities = [
+                    ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe'],
+                    ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword']
+                ];
+                for (const group of priorities) {
+                    for (const name of group) {
+                        const item = bot.inventory.items().find(i => i.name === name);
+                        if (item) return item;
+                    }
+                }
+                return null;
+            }
+
+            const playerEntry = Object.values(bot.players).find(
+                p => p.username?.toLowerCase() === targetName
+            );
+            const playerEntity = playerEntry?.entity;
+            if (playerEntity) {
+                bot.chat(`Attacking player ${playerEntry.username}!`);
+                const weapon = getBestWeapon();
+                if (weapon && (!bot.heldItem || bot.heldItem.name !== weapon.name)) await bot.equip(weapon, 'hand');
+                await bot.pathfinder.goto(new goals.GoalFollow(playerEntity, 1));
+                bot.attack(playerEntity);
+                break;
+            }
+            if (playerEntry && !playerEntity) {
+                bot.chat(`I see player "${playerEntry.username}" in the world, but can't reach them right now.`);
+                break;
+            }
+
+            // Try to find a hostile mob nearby
+            const hostileMobs = [
+                "zombie", "creeper", "skeleton", "spider", "enderman", "witch", "slime", "drowned", "husk", "stray",
+                "phantom", "pillager", "vindicator", "evoker", "ravager", "illusioner", "blaze", "magma_cube", "ghast",
+                "wither_skeleton", "piglin", "piglin_brute", "zombified_piglin", "hoglin", "zoglin", "warden", "shulker",
+                "silverfish", "endermite", "guardian", "elder_guardian", "vex"
+            ];
+
+            const mobEntity = Object.values(bot.entities).find(e =>
+                e.type === 'mob' &&
+                e.name?.toLowerCase() === targetName &&
+                hostileMobs.includes(e.name?.toLowerCase())
+            );
+
+            if (mobEntity) {
+                bot.chat(`Attacking mob ${targetName}!`);
+                const weapon = getBestWeapon();
+                if (weapon && (!bot.heldItem || bot.heldItem.name !== weapon.name)) await bot.equip(weapon, 'hand');
+                await bot.pathfinder.goto(new goals.GoalFollow(mobEntity, 1));
+                bot.attack(mobEntity);
+                break;
+            }
+
+            bot.chat(`Could not find player or hostile mob named "${targetName}" nearby.`);
             break;
+        }
 
         case 'glast':
             if (lastPlayerJoined) {
@@ -339,6 +412,128 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             }
             break;
 
+        case 'gscollect':
+            if (!collecting) {
+                bot.chat("I'm not collecting anything right now.");
+                break;
+            }
+            collecting = false;
+            // Report what was collected so far
+            const summary = Object.entries(collectedSummary)
+                .map(([type, count]) => `${count} ${type.replace(/_/g, ' ')}`)
+                .join(', ');
+            bot.chat(`Stopped collecting. Collected: ${summary || 'nothing'}.`);
+            collectedSummary = {};
+            break;
+
+        case 'gcollect': {
+            let mcData: ReturnType<typeof minecraftData>;
+            try {
+                mcData = minecraftData(bot.version);
+            } catch (e) {
+                bot.chat("Failed to load Minecraft data.");
+                break;
+            }
+
+            const resourceGroups: { [key: string]: string[] } = {
+                wood: [
+                    'oak_log', 'acacia_log', 'birch_log', 'dark_oak_log', 'jungle_log', 'mangrove_log', 'spruce_log',
+                    'oak_wood', 'acacia_wood', 'birch_wood', 'dark_oak_wood', 'jungle_wood', 'mangrove_wood', 'spruce_wood'
+                ],
+                stone: [
+                    'stone', 'cobblestone'
+                ],
+                dirt: [
+                    'dirt'
+                ]
+            };
+
+            const resourceType = args[0]?.toLowerCase();
+            const amount = Math.max(1, parseInt(args[1], 10) || 2);
+
+            if (!resourceType || !resourceGroups[resourceType]) {
+                bot.chat('Usage: gcollect <wood|stone|dirt> <amount>');
+                break;
+            }
+            const resourceTypes = resourceGroups[resourceType];
+
+            function getBestTool(blockName: string) {
+                const block = mcData.blocksByName[blockName];
+                if (!block || !block.harvestTools) return null;
+                let bestTool = null;
+                let bestTier = -1;
+                for (const item of bot.inventory.items()) {
+                    if (!item.name) continue;
+                    const tool = mcData.itemsByName[item.name];
+                    if (!tool) continue;
+                    if (block.harvestTools[tool.id]) {
+                        const tier = ['wooden', 'stone', 'iron', 'diamond', 'netherite', 'golden'].findIndex(t => item.name.includes(t));
+                        if (tier > bestTier) {
+                            bestTier = tier;
+                            bestTool = item;
+                        }
+                    }
+                }
+                return bestTool;
+            }
+
+            async function mineBlock(blockName: string, amountToMine = 1) {
+                const blockIds = [];
+                if (mcData.blocksByName[blockName]) {
+                    blockIds.push(mcData.blocksByName[blockName].id);
+                }
+                if (blockIds.length === 0) return 0;
+                let collected = 0;
+                while (collected < amountToMine && collecting) {
+                    const block = bot.findBlock({
+                        matching: blockIds,
+                        maxDistance: 32,
+                        point: bot.entity.position
+                    });
+                    if (!block) break;
+                    const tool = getBestTool(block.name);
+                    if (tool) {
+                        await bot.equip(tool, 'hand');
+                    }
+                    try {
+                        await bot.pathfinder.goto(new goals.GoalBlock(block.position.x, block.position.y, block.position.z));
+                        await bot.dig(block);
+                        collected++;
+                        collectedSummary[blockName] = (collectedSummary[blockName] || 0) + 1;
+                        await sleep(500);
+                    } catch (e) {
+                        break;
+                    }
+                }
+                return collected;
+            }
+
+            bot.chat(`Collecting ${amount} ${resourceType}...`);
+            collecting = true;
+            collectedSummary = {};
+            let totalCollected = 0;
+            let remaining = amount;
+            for (const type of resourceTypes) {
+                if (remaining <= 0 || !collecting) break;
+                const collected = await mineBlock(type, remaining);
+                if (collected > 0) {
+                    bot.chat(`Collected ${collected} ${type.replace(/_/g, ' ')}`);
+                    totalCollected += collected;
+                    remaining -= collected;
+                }
+            }
+            if (collecting) {
+                if (totalCollected === 0) {
+                    bot.chat(`Couldn't find any ${resourceType} nearby.`);
+                } else {
+                    bot.chat(`Finished collecting ${totalCollected} ${resourceType}.`);
+                }
+                collecting = false;
+                collectedSummary = {};
+            }
+            break;
+        }
+
         default:
             if (username === 'Shell') {
                 console.log(`[Shell] Unknown command: ${command}`);
@@ -346,10 +541,12 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
     }
 };
 
+
+
 export const createBot = (
     config: { ip: string; port: number; username: string; version: string },
     rl: readline.Interface
-    ): void => {
+): void => {
     rlInstance = rl;
     bot = Mineflayer.createBot({
         host: config.ip,
@@ -372,16 +569,19 @@ export const createBot = (
     });
 
     bot.on('entityHurt', (entity) => {
+        if (!bot || !bot.entity) return;
         if (entity === bot.entity) {
             bot.chat(`Ouch! I took damage.`);
-        }
-    });
-
-    bot.on('entityHurt', (entity) => {
-        if (entity === bot.entity) {
             const velY = bot.entity.velocity?.y ?? 0;
             if (velY < -0.5) {
                 bot.chat("Oof! I think I fell too hard!");
+            }
+            const nearby = Object.values(bot.entities ?? {}).find(e =>
+                e.position?.distanceTo(bot.entity.position) < 4 &&
+                e.type === 'mob'
+            );
+            if (nearby && nearby.name) {
+                bot.chat(`Help! ${nearby.name} is attacking me!`);
             }
         }
     });
@@ -392,20 +592,26 @@ export const createBot = (
     });
 
     bot.on('chat', async (username, message) => {
+        if (!bot) return;
         console.log(`[CHAT] <${username}> ${message}`);
         if (username !== bot.username) {
-            await handleChatCommand(username, message);
+            try {
+                await handleChatCommand(username, message);
+            } catch (e) {
+                console.error("Error handling chat command:", e);
+            }
         }
     });
 
     bot.once('spawn', () => {
+        if (!bot || !bot.entity) return;
         console.log(`Logged in as ${bot.username}`);
         bot.pathfinder.setMovements(new Movements(bot));
 
         setInterval(() => {
             if (!bot.entity) return; 
             const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-            if (headBlock && headBlock.name.includes('water')) {
+            if (headBlock && headBlock.name && headBlock.name.includes('water')) {
                 bot.chat("Glub glub... I'm underwater!");
             }
         }, 2000);
@@ -416,14 +622,17 @@ export const createBot = (
             const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
             const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
 
-            const isInWater = headBlock?.name.includes("water") || feetBlock?.name.includes("water");
+            const isInWater = (headBlock?.name?.includes("water") || feetBlock?.name?.includes("water"));
 
             if (isInWater) {
                 bot.setControlState("jump", true);
                 bot.setControlState("forward", true);
 
                 const ground = bot.findBlock({
-                    matching: (block) => !block.name.includes("water") && block.boundingBox === "block",
+                    matching: (block) => {
+                    if (!block?.name) return false;
+                    return !block.name.includes("water") && block.boundingBox === "block";
+                },
                     maxDistance: 20
                 });
 
@@ -437,8 +646,56 @@ export const createBot = (
         }, 1000);
 
         const changePos = async (): Promise<void> => {
+            if (!bot || !bot.entity) return;
             const lastAction = getRandom(CONFIG.action.commands) as Mineflayer.ControlState;
             const halfChance = Math.random() < 0.5;
+
+            if (lastAction === 'forward' || lastAction === 'jump') {
+                const pos = bot.entity.position;
+                const nextPos = pos.offset(
+                    -Math.sin(bot.entity.yaw) * 1,
+                    0,
+                    Math.cos(bot.entity.yaw) * 1
+                );
+                const blockBelow = bot.blockAt(nextPos.offset(0, -1, 0));
+                const blockAtNext = bot.blockAt(nextPos);
+                const blockBelowY = blockBelow ? blockBelow.position.y : null;
+                const currY = Math.floor(pos.y);
+
+                if (
+                    (!blockAtNext || blockAtNext.boundingBox === 'empty') &&
+                    blockBelowY !== null &&
+                    currY - blockBelowY > 1
+                ) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        for (let dz = -1; dz <= 1; dz++) {
+                            if (dx === 0 && dz === 0) continue;
+                            const testPos = pos.offset(dx, 0, dz);
+                            const testBlockBelow = bot.blockAt(testPos.offset(0, -1, 0));
+                            const testBlockAt = bot.blockAt(testPos);
+                            const testBlockBelowY = testBlockBelow ? testBlockBelow.position.y : null;
+                            if (
+                                (!testBlockAt || testBlockAt.boundingBox === 'empty') &&
+                                testBlockBelowY !== null &&
+                                currY - testBlockBelowY <= 1
+                            ) {
+                                try {
+                                    await bot.pathfinder.goto(new goals.GoalBlock(
+                                        Math.floor(testPos.x),
+                                        Math.floor(testBlockBelowY + 1),
+                                        Math.floor(testPos.z)
+                                    ));
+                                } catch (e) {
+                                    console.error("Error moving to safe block:", e);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+
             bot.setControlState('sprint', halfChance);
             bot.setControlState(lastAction, true);
             await sleep(CONFIG.action.holdDuration);
@@ -446,38 +703,76 @@ export const createBot = (
         };
 
         const changeView = async (): Promise<void> => {
+            if (!bot) return;
             const yaw = (Math.random() * Math.PI) - (0.5 * Math.PI);
             const pitch = (Math.random() * Math.PI) - (0.5 * Math.PI);
-            await bot.look(yaw, pitch, false);
+            try {
+                await bot.look(yaw, pitch, false);
+            } catch (e) {
+                console.error("Error changing view:", e);
+            }
         };
 
         loop = setInterval(() => {
             if (!following) { 
-            changeView();
-            changePos();
+                changeView();
+                changePos();
             }
         }, CONFIG.action.holdDuration);
 
         bot.on('playerJoined', (player) => {
+            if (!player || !player.username) return;
             lastPlayerJoined = player.username;
             const messages = [
-            `Oh, what's this? ${player.username}, a new friend has swum into our server!`,
-            `Welcome back, ${player.username}!`,
-            `Ah, it's ${player.username} again!`,
-            `The ocean is brighter with ${player.username} around!`
+                `Oh, what's this? ${player.username}, a new friend has swum into our server!`,
+                `Welcome back, ${player.username}!`,
+                `Ah, it's ${player.username} again!`,
+                `The ocean is brighter with ${player.username} around!`
             ];
             setTimeout(() => bot.chat(getRandom(messages)), 1000);
         });
     });
 
-    bot.on('entityHurt', (entity) => {
-        if (entity === bot.entity) {
-            const nearby = Object.values(bot.entities).find(e =>
-                e.position.distanceTo(bot.entity.position) < 4 &&
-                e.type === 'mob'
-            );
-            if (nearby) {
-                bot.chat(`Help! ${nearby.name} is attacking me!`);
+    const hostileMobs = [
+        "zombie", "creeper", "skeleton", "spider", "enderman", "witch", "slime", "drowned", "husk", "stray",
+        "phantom", "pillager", "vindicator", "evoker", "ravager", "illusioner", "blaze", "magma_cube", "ghast",
+        "wither_skeleton", "piglin", "piglin_brute", "zombified_piglin", "hoglin", "zoglin", "warden", "shulker",
+        "silverfish", "endermite", "guardian", "elder_guardian", "vex"
+    ];
+
+    bot.on('entityMoved', (entity) => {
+        if (!bot || !bot.entity || !entity || !entity.position || entity.type !== 'mob') return;
+        const mobName = entity.name?.toLowerCase();
+        if (!mobName || !hostileMobs.includes(mobName)) return;
+
+        const mobPos = entity.position;
+        const botPos = bot.entity.position;
+        if (!mobPos || !botPos) return;
+        const distance = botPos.distanceTo(mobPos);
+
+        if (distance < 6) {
+            const dx = botPos.x - mobPos.x;
+            const dz = botPos.z - mobPos.z;
+            const length = Math.sqrt(dx * dx + dz * dz) || 1;
+            const runX = botPos.x + (dx / length) * 8;
+            const runZ = botPos.z + (dz / length) * 8;
+
+            // Find the ground Y at the run position
+            let runY = botPos.y;
+            for (let y = Math.floor(botPos.y); y > 0; y--) {
+                const block = bot.blockAt(new Vec3(runX, y, runZ));
+                if (block && block.boundingBox === 'block') {
+                    runY = y + 1;
+                    break;
+                }
+            }
+
+            try {
+                bot.pathfinder.setMovements(new Movements(bot));
+                bot.pathfinder.setGoal(new goals.GoalBlock(Math.round(runX), Math.round(runY), Math.round(runZ)));
+                bot.chat("Hostile mob detected! Running away!");
+            } catch (e) {
+                console.error("Error running away from mob:", e);
             }
         }
     });
