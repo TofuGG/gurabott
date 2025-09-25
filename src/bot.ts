@@ -756,8 +756,6 @@ export const createBot = (
             const length = Math.sqrt(dx * dx + dz * dz) || 1;
             const runX = botPos.x + (dx / length) * 8;
             const runZ = botPos.z + (dz / length) * 8;
-
-            // Find the ground Y at the run position
             let runY = botPos.y;
             for (let y = Math.floor(botPos.y); y > 0; y--) {
                 const block = bot.blockAt(new Vec3(runX, y, runZ));
