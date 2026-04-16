@@ -7,78 +7,30 @@ import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 const { pathfinder, Movements, goals } = pathfinderLib;
 const { GoalFollow } = goals;
-import { Block } from 'prismarine-block'; 
 
 let bot: Mineflayer.Bot;
+let following = false;
 let lastPlayerJoined: string | null = null;
 let loop: NodeJS.Timeout;
 let currentConfig: { ip: string; port: number; username: string; version: string } | null = null;
 let rlInstance: readline.Interface | null = null;
 let collecting = false;
 let collectedSummary: { [key: string]: number } = {};
-let intervals: NodeJS.Timeout[] = [];
-
-enum BotState {
-    IDLE = 'idle',
-    FOLLOWING = 'following',
-    COLLECTING = 'collecting',
-    FLEEING = 'fleeing',
-    EATING = 'eating',
-    SLEEPING = 'sleeping'
-}
-
-let currentState: BotState = BotState.IDLE;
-
-function setState(newState: BotState) {
-    if (currentState === newState) return;
-
-    console.log(`[STATE] ${currentState} → ${newState}`);
-    currentState = newState;
-
-    // Stop any current movement when switching tasks
-    try {
-        bot.pathfinder?.setGoal(null);
-        clearAllControls(bot);
-    } catch {}
-}
-
 
 const disconnect = (): void => {
-    for (const i of intervals) clearInterval(i);
-    intervals = [];
-
-    bot?.removeAllListeners();
-    bot?.quit();
+    clearInterval(loop);
+    bot?.quit?.();
+    bot?.end?.();
 };
 
-
-let reconnectAttempts = 0;
-let reconnecting = false;
-
-async function reconnect() {
-    if (reconnecting) return;
-    reconnecting = true;
-
-    if (reconnectAttempts >= 5) {
-        console.log("Too many reconnect attempts. Stopping.");
-        return;
-    }
-
-    reconnectAttempts++;
-    console.log(
-        `Reconnecting (${reconnectAttempts}/5) in ${CONFIG.action.retryDelay / 1000}s...`
-    );
-
-    disconnect();
-    await sleep(CONFIG.action.retryDelay);
-
-    if (currentConfig && rlInstance) {
-        createBot(currentConfig, rlInstance);
-    }
-
-    reconnecting = false;
+const reconnect = async (): Promise<void> => {
+console.log(`Trying to reconnect in ${CONFIG.action.retryDelay / 1000} seconds...\n`);
+disconnect();
+await sleep(CONFIG.action.retryDelay);
+if (currentConfig) {
+    createBot(currentConfig, rlInstance!);
 }
-
+};
 
 function startCommandLine(bot: any, rl: readline.Interface) {
     rl.on('line', (line) => {
@@ -117,69 +69,6 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             bot.chat(`Pong! ${bot.player.ping}ms`);
             break;
 
-        case 'gsleep': {
-            if (currentState !== BotState.IDLE) {
-                bot.chat("I'm busy right now!");
-                break;
-            }
-
-            const mcData = minecraftData(bot.version);
-
-            // Find the head of the bed
-            const bed = bot.findBlock({
-                matching: (block) => {
-                    return block?.name?.endsWith('_bed') && block.metadata === 0; // metadata 0 = head in most versions
-                },
-                maxDistance: 32
-            });
-
-            if (!bed) {
-                bot.chat("I can't see any bed.");
-                break;
-            }
-
-            const distance = bot.entity.position.distanceTo(bed.position);
-
-            if (distance > 12) {
-                bot.chat("The bed is too far away.");
-                break;
-            }
-
-            setState(BotState.SLEEPING);
-
-            try {
-                bot.chat("I am going to sleep. Goodnight 🌙");
-
-                bot.pathfinder.setMovements(new Movements(bot));
-                bot.pathfinder.setGoal(
-                    new goals.GoalBlock(bed.position.x, bed.position.y, bed.position.z)
-                );
-
-                await sleep(1500);
-
-                await bot.sleep(bed);
-
-            } catch (err: any) {
-                const msg = err?.message?.toLowerCase?.() || "";
-
-                if (msg.includes("day")) {
-                    bot.chat("It's not night, I can't sleep now.");
-                } else if (msg.includes("monster")) {
-                    bot.chat("I feel scared to sleep when monsters are nearby.");
-                } else if (msg.includes("obstructed")) {
-                    bot.chat("The bed is blocked.");
-                } else {
-                    bot.chat("I couldn't sleep.");
-                }
-            } finally {
-                bot.pathfinder.setGoal(null);
-                setState(BotState.IDLE);
-            }
-
-            break;
-        }
-
-
         case 'ghelp':
             const helpMessages = [
                 `Chat commands:`,
@@ -201,8 +90,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 `>>gkill <mob|player name>: attack a nearby hostile mob or player using the best axe (if available), else best sword, else hand.`,
                 `>>glast: show the last player who joined.`,
                 `>>gsfollow: stop following the current player.`,
-                `>>gcollect <wood|stone|dirt> <amount>: collect a specific amount of the given resource type using the best tool available.`,
-                `>>gsleep: make the bot sleep in a nearby bed.`,
+                `>>gcollect <wood|stone|dirt> <amount>: collect a specific amount of the given resource type using the best tool available.`
             ];
             for (const line of helpMessages) {
                 await sleep(getRandomDelay(700, 1200)); 
@@ -236,66 +124,39 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             }
             break;
 
-        case 'geat': {
-            if (currentState !== BotState.IDLE) {
-                bot.chat("I'm busy right now!");
-                break;
-            }
-
-            const items = bot.inventory.items();
-
+        case 'geat':
             if (args.length === 0) {
                 if (items.length === 0) {
                     bot.chat("I don't have any food to eat!");
                 } else {
-                    const foodList = items
-                        .map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`)
-                        .join('\n');
-
+                    const foodList = items.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join('\n');
                     bot.chat(foodList);
                     bot.chat('Usage: geat <food_number> <amount>');
                 }
-                break;
-            }
-
-            const foodIdx = parseInt(args[0], 10) - 1; // user sees 1-based
-            const amount = Math.max(1, parseInt(args[1], 10) || 1);
-
-            if (Number.isNaN(foodIdx) || foodIdx < 0 || foodIdx >= items.length) {
-                bot.chat('Invalid food number. Usage: geat <food_number> <amount>');
-                break;
-            }
-
-            const food = items[foodIdx];
-
-            setState(BotState.EATING);
-
-            let eaten = 0;
-
-            try {
-                await bot.equip(food, 'hand');
-
-                for (let i = 0; i < amount && bot.food < 20; i++) {
-                    await bot.consume();
+            } else {
+                const foodIdx = parseInt(args[0], 10) - 1;
+                const amount = parseInt(args[1], 10) || 1;
+                if (isNaN(foodIdx) || foodIdx < 0 || foodIdx >= items.length) {
+                    bot.chat('Invalid food number. Usage: geat <food_number> <amount>');
+                    break;
+                }
+                const food = items[foodIdx];
+                let eaten = 0;
+                for (let i = 0; i < amount && bot.food < 20 && food.count > 0; i++) {
+                    await bot.equip(food, 'hand')
+                    await bot.consume()
                     eaten++;
-                    await sleep(500);
-
+                    food.count--;
+                    await sleep(500); 
                     if (bot.food === 20) {
                         bot.chat("Now I'm full!");
                         break;
                     }
                 }
-
                 bot.chat(`Ate ${eaten} ${food.name}`);
-            } catch (err) {
-                bot.chat("I couldn't eat that food.");
-            } finally {
-                setState(BotState.IDLE);
+                if (bot.food === 20) bot.chat("Now I'm full!");
             }
-
             break;
-        }
-
 
         case 'gjump':
             const jumpAmount = parseInt(args[0], 10) || 1;
@@ -330,7 +191,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 }
                 bot.chat(`Dropping ${amount} ${item.name}`);
                 for (let i = 0; i < amount; i++) {
-                    await bot.toss(item.type, null, Math.min(amount, item.count));
+                    await bot.toss(item.type, null, 1);
                     await sleep(200);
                 }
             }
@@ -377,15 +238,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 }
             };
 
-            bot.on('message', onMessage);
-
-            // send command
             bot.chat(tpCommand);
-
-            // auto cleanup
-            setTimeout(() => {
-                bot.removeListener('message', onMessage);
-            }, 3000);
             break;
         
         case 'gfollow':
@@ -405,11 +258,10 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 break;
             }
 
-            setState(BotState.FOLLOWING);
+            following = true;
             await bot.chat(`Following ${targetName}`);
             bot.pathfinder.setMovements(new Movements(bot));
             bot.pathfinder.setGoal(new GoalFollow(playerEntity, 1), true);
-
             break;
             
         case 'gcraft': {
@@ -507,10 +359,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 bot.chat(`Attacking player ${playerEntry.username}!`);
                 const weapon = getBestWeapon();
                 if (weapon && (!bot.heldItem || bot.heldItem.name !== weapon.name)) await bot.equip(weapon, 'hand');
-                bot.pathfinder.setGoal(
-                    new goals.GoalFollow(playerEntity, 1),
-                    true
-                );
+                await bot.pathfinder.goto(new goals.GoalFollow(playerEntity, 1));
                 bot.attack(playerEntity);
                 break;
             }
@@ -537,10 +386,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 bot.chat(`Attacking mob ${targetName}!`);
                 const weapon = getBestWeapon();
                 if (weapon && (!bot.heldItem || bot.heldItem.name !== weapon.name)) await bot.equip(weapon, 'hand');
-                bot.pathfinder.setGoal(
-                    new goals.GoalFollow(mobEntity, 1),
-                    true
-                );
+                await bot.pathfinder.goto(new goals.GoalFollow(mobEntity, 1));
                 bot.attack(mobEntity);
                 break;
             }
@@ -558,10 +404,10 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             break;
 
         case 'gsfollow':
-            if (currentState === BotState.FOLLOWING) {
-                setState(BotState.IDLE);
+            if (following) {
+                following = false;
+                bot.pathfinder.setGoal(null);
                 bot.chat("Stopped following.");
-
             } else {
                 bot.chat(`<Not following anyone>`);
             }
@@ -633,47 +479,39 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             }
 
             async function mineBlock(blockName: string, amountToMine = 1) {
+                const blockIds = [];
+                if (mcData.blocksByName[blockName]) {
+                    blockIds.push(mcData.blocksByName[blockName].id);
+                }
+                if (blockIds.length === 0) return 0;
                 let collected = 0;
-
-                const blockId = mcData.blocksByName[blockName]?.id;
-                if (!blockId) return 0;
-
                 while (collected < amountToMine && collecting) {
                     const block = bot.findBlock({
-                        matching: blockId,
-                        maxDistance: 32
+                        matching: blockIds,
+                        maxDistance: 32,
+                        point: bot.entity.position
                     });
                     if (!block) break;
-
-                    const tool = getBestTool(blockName);
-                    if (tool) await bot.equip(tool, 'hand');
-
-                    await bot.pathfinder.goto(
-                        new goals.GoalBlock(block.position.x, block.position.y, block.position.z)
-                    );
-
-                    await bot.dig(block);
-                    collected++;
-
-                    collectedSummary[blockName] =
-                        (collectedSummary[blockName] ?? 0) + 1;
+                    const tool = getBestTool(block.name);
+                    if (tool) {
+                        await bot.equip(tool, 'hand');
+                    }
+                    try {
+                        await bot.pathfinder.goto(new goals.GoalBlock(block.position.x, block.position.y, block.position.z));
+                        await bot.dig(block);
+                        collected++;
+                        collectedSummary[blockName] = (collectedSummary[blockName] || 0) + 1;
+                        await sleep(500);
+                    } catch (e) {
+                        break;
+                    }
                 }
-
                 return collected;
             }
 
-
-            if (currentState !== BotState.IDLE) {
-                bot.chat("I'm busy right now!");
-                break;
-            }
-
-            setState(BotState.COLLECTING);
+            bot.chat(`Collecting ${amount} ${resourceType}...`);
             collecting = true;
             collectedSummary = {};
-
-            bot.chat(`Collecting ${amount} ${resourceType}...`);
-
             let totalCollected = 0;
             let remaining = amount;
             for (const type of resourceTypes) {
@@ -693,7 +531,6 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 }
                 collecting = false;
                 collectedSummary = {};
-                setState(BotState.IDLE);
             }
             break;
         }
@@ -711,7 +548,6 @@ export const createBot = (
     config: { ip: string; port: number; username: string; version: string },
     rl: readline.Interface
 ): void => {
-    currentConfig = config;
     rlInstance = rl;
     bot = Mineflayer.createBot({
         host: config.ip,
@@ -725,10 +561,6 @@ export const createBot = (
 
     bot.on('error', (err) => {
         console.error('Gura network error:', err);
-    });
-    bot.on('end', (reason) => {
-        console.log('Connection ended:', reason);
-        reconnect();
     });
 
     bot.on('kicked', (reason, loggedIn) => {
@@ -754,7 +586,12 @@ export const createBot = (
             }
         }
     });
-    
+
+    bot.on('end', (reason) => {
+        console.log('Connection ended (Mineflayer):', reason);
+        reconnect();   
+    });
+
     bot.on('chat', async (username, message) => {
         if (!bot) return;
         console.log(`[CHAT] <${username}> ${message}`);
@@ -772,16 +609,15 @@ export const createBot = (
         console.log(`Logged in as ${bot.username}`);
         bot.pathfinder.setMovements(new Movements(bot));
 
-        intervals.push(setInterval(() => {
-            if (!bot.entity) return;
-
+        setInterval(() => {
+            if (!bot.entity) return; 
             const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-            if (headBlock?.name?.includes('water')) {
+            if (headBlock && headBlock.name && headBlock.name.includes('water')) {
                 bot.chat("Glub glub... I'm underwater!");
             }
-        }, 2000));
+        }, 2000);
 
-        intervals.push(setInterval(() => {
+        setInterval(() => {
             if (!bot.entity || !bot.entity.position) return;
 
             const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
@@ -808,7 +644,7 @@ export const createBot = (
                 bot.setControlState("jump", false);
                 bot.setControlState("forward", false);
             }
-        }, 1000));
+        }, 1000);
 
         const changePos = async (): Promise<void> => {
             if (!bot || !bot.entity) return;
@@ -878,15 +714,12 @@ export const createBot = (
             }
         };
 
-        intervals.push(setInterval(() => {
-            if (!bot || !bot.entity) return;
-            if (currentState !== BotState.IDLE) return;
-
-            changeView();
-            changePos();
-        }, CONFIG.action.holdDuration));
-
-
+        loop = setInterval(() => {
+            if (!following) { 
+                changeView();
+                changePos();
+            }
+        }, CONFIG.action.holdDuration);
 
         bot.on('playerJoined', (player) => {
             if (!player || !player.username) return;
@@ -909,63 +742,47 @@ export const createBot = (
     ];
 
     bot.on('entityMoved', (entity) => {
-        if (!bot || !bot.entity) return;
-        if (!entity || entity.type !== 'mob' || !entity.position) return;
-        if (currentState === BotState.FLEEING) return;
-
+        if (!bot || !bot.entity || !entity || !entity.position || entity.type !== 'mob') return;
         const mobName = entity.name?.toLowerCase();
         if (!mobName || !hostileMobs.includes(mobName)) return;
 
-        const distance = bot.entity.position.distanceTo(entity.position);
-        if (distance >= 6) return;
-
-        setState(BotState.FLEEING);
-
-        const botPos = bot.entity.position;
         const mobPos = entity.position;
+        const botPos = bot.entity.position;
+        if (!mobPos || !botPos) return;
+        const distance = botPos.distanceTo(mobPos);
 
-        const dx = botPos.x - mobPos.x;
-        const dz = botPos.z - mobPos.z;
-        const length = Math.sqrt(dx * dx + dz * dz) || 1;
+        if (distance < 6) {
+            const dx = botPos.x - mobPos.x;
+            const dz = botPos.z - mobPos.z;
+            const length = Math.sqrt(dx * dx + dz * dz) || 1;
+            const runX = botPos.x + (dx / length) * 8;
+            const runZ = botPos.z + (dz / length) * 8;
+            let runY = botPos.y;
+            for (let y = Math.floor(botPos.y); y > 0; y--) {
+                const block = bot.blockAt(new Vec3(runX, y, runZ));
+                if (block && block.boundingBox === 'block') {
+                    runY = y + 1;
+                    break;
+                }
+            }
 
-        const runX = botPos.x + (dx / length) * 8;
-        const runZ = botPos.z + (dz / length) * 8;
-        let runY = botPos.y;
-
-        for (let y = Math.floor(botPos.y); y > 0; y--) {
-            const block = bot.blockAt(new Vec3(runX, y, runZ));
-            if (block && block.boundingBox === 'block') {
-                runY = y + 1;
-                break;
+            try {
+                bot.pathfinder.setMovements(new Movements(bot));
+                bot.pathfinder.setGoal(new goals.GoalBlock(Math.round(runX), Math.round(runY), Math.round(runZ)));
+                bot.chat("Hostile mob detected! Running away!");
+            } catch (e) {
+                console.error("Error running away from mob:", e);
             }
         }
-
-        try {
-            bot.chat("Hostile mob detected! Running away!");
-            bot.pathfinder.setMovements(new Movements(bot));
-            bot.pathfinder.setGoal(
-                new goals.GoalBlock(
-                    Math.round(runX),
-                    Math.round(runY),
-                    Math.round(runZ)
-                )
-            );
-        } catch (e) {
-            console.error("Error fleeing:", e);
-        }
-
-        setTimeout(() => {
-            if (currentState === BotState.FLEEING) {
-                setState(BotState.IDLE);
-            }
-        }, 5000);
     });
-
 
     bot.once('login', () => {
         setTimeout(() => bot.chat(`Hewwo! Same desu~`), 500);
         console.log(`AFKBot logged in as ${bot.username}\n`);
         bot.setMaxListeners(35);
+    });
+    bot.on('kicked', (reason, loggedIn) => {
+        console.error('Kicked:', reason, 'logged in?', loggedIn);
     });
 
 };

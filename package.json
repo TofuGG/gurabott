@@ -4,15 +4,15 @@
   "name": "gurabot",
   "version": "1.0.0",
   "scripts": {
-  "start": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx ./src/index.ts",
-  "dev": "node --inspect --loader tsx ./src/index.ts"
+    "start": "cross-env NODE_OPTIONS=--max-old-space-size=400 tsx ./src/index.ts",
+    "dev": "node --inspect --loader tsx ./src/index.ts"
   },
   "dependencies": {
-    "minecraft-data": "^3.97.0",
-    "minecraft-protocol": "^1.61.0",
-    "mineflayer": "^4.32.0",
+    "minecraft-data": "^3.105.0",
+    "minecraft-protocol": "^1.64.0",
+    "mineflayer": "github:PrismarineJS/mineflayer",
     "mineflayer-pathfinder": "^2.4.5",
-    "tsx": "^4.20.5"
+    "tsx": "^4.21.0"
   },
   "main": "index.js",
   "keywords": [],
@@ -20,6 +20,8 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "cross-env": "^10.0.0"
+    "cross-env": "^10.1.0",
+    "typescript": "^5.9.3"
   }
 }
+
