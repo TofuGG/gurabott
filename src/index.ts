@@ -2,7 +2,6 @@ import { loadConfig } from './config.ts';
 import { createBot } from './bot.ts';
 import initWeb from './web.ts';
 import readline from 'readline';
-import { selectOrCreateMap, MapMemory } from './mapMemory.ts';
 
 // Create a single readline interface
 const rl = readline.createInterface({
@@ -28,10 +27,6 @@ async function main() {
     // Load config once, pass the rl
     const config = await loadConfig(rl);
 
-    // Map memory selection
-    const mapData = await selectOrCreateMap(rl);
-    const memory = new MapMemory(mapData);
-
     // Initialize web server
     initWeb();
 
@@ -42,7 +37,7 @@ async function main() {
         username: config.client.username
     };
     console.log(`\n🔄 Connecting to ${botConfig.ip}:${botConfig.port} as ${botConfig.username}...`);
-    createBot(botConfig, rl, mineflayerViewer, memory);
+    createBot(botConfig, rl, mineflayerViewer);
 }
 
 // Run the main function

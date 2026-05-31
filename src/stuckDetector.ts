@@ -2,6 +2,7 @@ import { Bot } from 'mineflayer';
 import pathfinderLib from 'mineflayer-pathfinder';
 const { goals } = pathfinderLib;
 import { Vec3 } from 'vec3';
+import { sleep } from './utils.ts';
 
 const STUCK_TICK_THRESHOLD = 60;
 const MOVE_MIN = 0.06;
@@ -36,7 +37,26 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
         }
     });
 
+    let recentStucks = 0;
+    let stuckResetTimer: NodeJS.Timeout | null = null;
+
     async function unstuck(bot: Bot, stuckPos: Vec3) {
+        recentStucks++;
+        if (stuckResetTimer) clearTimeout(stuckResetTimer);
+        stuckResetTimer = setTimeout(() => { recentStucks = 0; }, 30000);
+
+        // If stuck more than 4 times in 30s, just wait it out — pathfinding isn't helping
+        if (recentStucks > 4) {
+            console.log(`[STUCK] Firing too frequently (${recentStucks}x) — pausing movement for 10s`);
+            escaping = true;
+            setEscaping?.(true);
+            await sleep(10000);
+            escaping = false;
+            setEscaping?.(false);
+            recentStucks = 0;
+            return;
+        }
+
         escaping = true;
         setEscaping?.(true);
         console.log('[STUCK] Detected stuck at', stuckPos.toString(), '— escaping');
@@ -99,8 +119,4 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
         }
         return null;
     }
-}
-
-function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }

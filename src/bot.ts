@@ -11,7 +11,6 @@ const { goals } = pathfinderLib;
 const { GoalFollow, GoalBlock, GoalGetToBlock } = goals;
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI } from './movementAI.ts';
-import { MapMemory } from './mapMemory.ts';
 import Groq from 'groq-sdk';
 
 // Check if AI is enabled and API key is provided
@@ -764,8 +763,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
 export const createBot = (
     config: { ip: string; port: number; username: string },
     rl: readline.Interface,
-    mineflayerViewer?: any,
-    memory?: MapMemory
+    mineflayerViewer?: any
 ): void => {
     currentConfig = config;
     rlInstance = rl;
@@ -783,32 +781,11 @@ export const createBot = (
 
     bot.on('end', (reason) => {
         console.log('Connection ended:', reason);
-        memory?.forceSave();
         reconnect();
     });
 
     bot.on('kicked', (reason, loggedIn) => {
         console.error('Kicked. Reason:', reason, '| Logged in:', loggedIn);
-    });
-
-    bot.on('death', () => {
-        const pos = bot.entity?.position;
-        if (!pos) return;
-        console.log(`[Bot] Died at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
-        memory?.recordDeath(pos, bot.health ?? 0);
-    });
-
-    bot.on('spawn', () => {
-        // After respawn, hold idle for 5s so the bot doesn't immediately
-        // wander back toward the death spot before memory kicks in
-        const prevState = currentState;
-        setState(BotState.IDLE);
-        clearAllControls(bot);
-        try { bot.pathfinder?.setGoal(null); } catch {}
-        console.log('[Bot] Respawned — holding position for 5s');
-        setTimeout(() => {
-            if (currentState === BotState.IDLE) setState(BotState.IDLE); // re-trigger any idle hooks
-        }, 5000);
     });
 
     bot.on('entityHurt', (entity) => {
@@ -900,7 +877,8 @@ export const createBot = (
         }
         
         bot.pathfinder.setMovements(getSafeMovements());
-        
+        startStuckDetector(bot, (v) => { isEscapingStuck = v; });
+
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
         await sleep(1000);
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
@@ -973,16 +951,7 @@ export const createBot = (
                 }
             }
         }, 1000));
-        let onStuckCallback: (() => void) | null = null;
-        startMovementAI(
-            bot, () => currentState, getSafeMovements, HOSTILE_MOBS, intervals,
-            () => isEscapingStuck, memory,
-            (cb) => { onStuckCallback = cb; }
-        );
-        startStuckDetector(bot, (v) => {
-            isEscapingStuck = v;
-            if (v && onStuckCallback) onStuckCallback(); // notify movement AI
-        });
+        startMovementAI(bot, () => currentState, getSafeMovements, HOSTILE_MOBS, intervals, () => isEscapingStuck);
     });
 
     bot.on('playerJoined', (player) => {
