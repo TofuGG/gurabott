@@ -31,11 +31,13 @@ async function main() {
     initWeb();
 
     // Create bot
-    createBot({
+    const botConfig = {
         ip: config.client.host,
         port: parseInt(config.client.port, 10),
         username: config.client.username
-    }, rl, mineflayerViewer); // pass rl and viewer
+    };
+    console.log(`\n🔄 Connecting to ${botConfig.ip}:${botConfig.port} as ${botConfig.username}...`);
+    createBot(botConfig, rl, mineflayerViewer);
 }
 
 // Run the main function

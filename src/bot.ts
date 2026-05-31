@@ -6,8 +6,10 @@ import PERSONALITY from "../personality.json" with { type: 'json' };
 import * as readline from 'readline';
 import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
-const { pathfinder, Movements, goals } = pathfinderLib;
+const { pathfinder, Movements} = pathfinderLib;
+const { goals } = pathfinderLib;
 const { GoalFollow, GoalBlock, GoalGetToBlock } = goals;
+import { startStuckDetector } from './stuckDetector.ts'
 import Groq from 'groq-sdk';
 
 // Check if AI is enabled and API key is provided
@@ -52,6 +54,32 @@ function setState(newState: BotState) {
         bot.pathfinder?.setGoal(null);
         clearAllControls(bot);
     } catch {}
+}
+
+function randomNearbyGround(bot: Mineflayer.Bot, minDist: number, maxDist: number): Vec3 | null {
+    const pos = bot.entity.position;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = minDist + Math.random() * (maxDist - minDist);
+        const tx = Math.floor(pos.x + Math.cos(angle) * dist);
+        const tz = Math.floor(pos.z + Math.sin(angle) * dist);
+        // scan a few blocks up/down for solid ground
+        for (let dy = 3; dy >= -3; dy--) {
+            const ty = Math.floor(pos.y) + dy;
+            const block = bot.blockAt(new Vec3(tx, ty - 1, tz));
+            const space1 = bot.blockAt(new Vec3(tx, ty, tz));
+            const space2 = bot.blockAt(new Vec3(tx, ty + 1, tz));
+            if (
+                block && block.boundingBox === 'block' &&
+                !block.name.includes('water') &&
+                (!space1 || space1.boundingBox === 'empty') &&
+                (!space2 || space2.boundingBox === 'empty')
+            ) {
+                return new Vec3(tx, ty, tz);
+            }
+        }
+    }
+    return null;
 }
 
 const disconnect = (): void => {
@@ -871,6 +899,7 @@ export const createBot = (
         }
         
         bot.pathfinder.setMovements(getSafeMovements());
+        startStuckDetector(bot);
 
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
         await sleep(1000);
@@ -884,85 +913,153 @@ export const createBot = (
         }, 2000));
 
         // Water swim-out interval
-        intervals.push(setInterval(() => {
-            if (!bot.entity?.position || currentState !== BotState.IDLE) return;
+        let waterEscaping = false;
+        intervals.push(setInterval(async () => {
+            if (!bot.entity?.position || currentState !== BotState.IDLE || waterEscaping) return;
             const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
             const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
             const isInWater = headBlock?.name?.includes("water") || feetBlock?.name?.includes("water");
-            if (isInWater) {
-                bot.setControlState("jump", true);
-                bot.setControlState("forward", true);
-                const ground = bot.findBlock({
-                    matching: (block) => !!(block?.name && !block.name.includes("water") && block.boundingBox === "block"),
-                    maxDistance: 20
-                });
-                if (ground) bot.lookAt(ground.position.offset(0.5, 0.5, 0.5));
-            } else {
+
+            if (!isInWater) {
                 bot.setControlState("jump", false);
                 bot.setControlState("forward", false);
+                return;
+            }
+
+            // Look for a shore block at or above bot's Y (not the lake floor)
+            const botY = Math.floor(bot.entity.position.y);
+            const shore = bot.findBlock({
+                matching: (block) => !!(
+                    block?.name &&
+                    !block.name.includes("water") &&
+                    block.boundingBox === "block" &&
+                    block.position != null &&
+                    block.position.y >= botY
+                ),
+                maxDistance: 20
+            });
+
+            if (shore) {
+                // Aim at the shore surface and swim toward it
+                await bot.lookAt(shore.position.offset(0.5, 1, 0.5));
+                bot.setControlState("jump", true);
+                bot.setControlState("forward", true);
+            } else {
+                // No visible shore — use pathfinder to find dry land
+                waterEscaping = true;
+                bot.setControlState("jump", false);
+                bot.setControlState("forward", false);
+                try {
+                    const dryLand = bot.findBlock({
+                        matching: (block) => !!(
+                            block?.name &&
+                            !block.name.includes("water") &&
+                            block.boundingBox === "block"
+                        ),
+                        maxDistance: 32
+                    });
+                    if (dryLand) {
+                        await bot.pathfinder.goto(new goals.GoalBlock(
+                            dryLand.position.x,
+                            dryLand.position.y + 1,
+                            dryLand.position.z
+                        ));
+                    }
+                } catch {
+                    // pathfinder failed, fall back to just jumping up
+                    bot.setControlState("jump", true);
+                } finally {
+                    waterEscaping = false;
+                }
             }
         }, 1000));
 
         // Idle wander interval
-        const changePos = async (): Promise<void> => {
-            if (!bot?.entity) return;
-            const lastAction = getRandom(CONFIG.action.commands) as Mineflayer.ControlState;
-            const halfChance = Math.random() < 0.5;
+        // Natural idle wander
+        let wandering = false;
+        const naturalWander = async (): Promise<void> => {
+            if (!bot?.entity || currentState !== BotState.IDLE || wandering) return;
+            wandering = true;
 
-            if (lastAction === 'forward' || lastAction === 'jump') {
-                const pos = bot.entity.position;
-                const nextPos = pos.offset(-Math.sin(bot.entity.yaw) * 1, 0, Math.cos(bot.entity.yaw) * 1);
-                const blockBelow = bot.blockAt(nextPos.offset(0, -1, 0));
-                const blockAtNext = bot.blockAt(nextPos);
-                const blockBelowY = blockBelow ? blockBelow.position.y : null;
-                const currY = Math.floor(pos.y);
+            try {
+                const roll = Math.random();
 
-                if (
-                    (!blockAtNext || blockAtNext.boundingBox === 'empty') &&
-                    blockBelowY !== null && currY - blockBelowY > 1
-                ) {
-                    for (let dx = -1; dx <= 1; dx++) {
-                        for (let dz = -1; dz <= 1; dz++) {
-                            if (dx === 0 && dz === 0) continue;
-                            const testPos = pos.offset(dx, 0, dz);
-                            const testBlockBelow = bot.blockAt(testPos.offset(0, -1, 0));
-                            const testBlockAt = bot.blockAt(testPos);
-                            const testBlockBelowY = testBlockBelow ? testBlockBelow.position.y : null;
-                            if (
-                                (!testBlockAt || testBlockAt.boundingBox === 'empty') &&
-                                testBlockBelowY !== null && currY - testBlockBelowY <= 1
-                            ) {
-                                try {
-                                    await bot.pathfinder.goto(new goals.GoalBlock(
-                                        Math.floor(testPos.x), Math.floor(testBlockBelowY + 1), Math.floor(testPos.z)
-                                    ));
-                                } catch (e) { console.error("Error moving to safe block:", e); }
-                                return;
-                            }
-                        }
+                if (roll < 0.15) {
+                    // 15%: just stand still and look around slowly, like daydreaming
+                    const lookCount = 1 + Math.floor(Math.random() * 3);
+                    for (let i = 0; i < lookCount; i++) {
+                        if (currentState !== BotState.IDLE) break;
+                        const yaw = Math.random() * Math.PI * 2;
+                        const pitch = (Math.random() * 0.8) - 0.3; // mostly horizontal
+                        try { await bot.look(yaw, pitch, false); } catch {}
+                        await sleep(800 + Math.random() * 1200);
                     }
-                    return;
+
+                } else if (roll < 0.35) {
+                    // 20%: short stroll 3-8 blocks away
+                    const dest = randomNearbyGround(bot, 3, 8);
+                    if (dest) {
+                        bot.pathfinder.setMovements(getSafeMovements());
+                        try {
+                            await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z));
+                        } catch {}
+                        // pause and look around after arriving
+                        await sleep(500 + Math.random() * 1000);
+                        try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch {}
+                    }
+
+                } else if (roll < 0.70) {
+                    // 35%: proper walk 8-20 blocks away, maybe sprint partway
+                    const dest = randomNearbyGround(bot, 8, 20);
+                    if (dest) {
+                        const movements = getSafeMovements();
+                        movements.allowSprinting = Math.random() < 0.4; // sprint 40% of walks
+                        bot.pathfinder.setMovements(movements);
+                        try {
+                            await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z));
+                        } catch {}
+                        await sleep(300 + Math.random() * 800);
+                    }
+
+                } else if (roll < 0.85) {
+                    // 15%: walk then stop midway and look at something (distracted)
+                    const dest = randomNearbyGround(bot, 5, 15);
+                    if (dest) {
+                        bot.pathfinder.setMovements(getSafeMovements());
+                        // set goal but cancel it partway
+                        bot.pathfinder.setGoal(new goals.GoalBlock(dest.x, dest.y, dest.z));
+                        await sleep(1000 + Math.random() * 2000);
+                        bot.pathfinder.setGoal(null);
+                        clearAllControls(bot);
+                        // look around as if distracted
+                        try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.6) - 0.1, false); } catch {}
+                        await sleep(600 + Math.random() * 800);
+                    }
+
+                } else {
+                    // 15%: crouch briefly then stand (fidgeting)
+                    bot.setControlState('sneak', true);
+                    await sleep(400 + Math.random() * 600);
+                    bot.setControlState('sneak', false);
                 }
+
+            } finally {
+                clearAllControls(bot);
+                wandering = false;
             }
-
-            bot.setControlState('sprint', halfChance);
-            bot.setControlState(lastAction, true);
-            await sleep(CONFIG.action.holdDuration);
-            clearAllControls(bot);
         };
 
-        const changeView = async (): Promise<void> => {
-            if (!bot) return;
-            const yaw = (Math.random() * Math.PI) - (0.5 * Math.PI);
-            const pitch = (Math.random() * Math.PI) - (0.5 * Math.PI);
-            try { await bot.look(yaw, pitch, false); } catch (e) { console.error("Error changing view:", e); }
+        // Vary the wander interval between 4-10s for unpredictability
+        const scheduleWander = () => {
+            if (!bot?.entity) return;
+            const delay = 4000 + Math.random() * 6000;
+            const t = setTimeout(async () => {
+                await naturalWander();
+                scheduleWander(); // reschedule after each wander completes
+            }, delay);
+            intervals.push(t as any);
         };
-
-        intervals.push(setInterval(() => {
-            if (!bot?.entity || currentState !== BotState.IDLE) return;
-            changeView();
-            changePos();
-        }, CONFIG.action.holdDuration));
+        scheduleWander();
     });
 
     bot.on('playerJoined', (player) => {
@@ -1030,6 +1127,7 @@ export const createBot = (
 
     bot.once('login', () => {
         bot.setMaxListeners(35);
+        console.log(`🔗 Connected to server, waiting for world to load...`);
         if (AI_ENABLED) {
             setTimeout(() => bot.chat(PERSONALITY.messages.login), 500);
         }
