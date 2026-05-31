@@ -6,7 +6,11 @@ export interface BotConfig {
         host: string;
         port: string;
         username: string;
-        version: string;
+    };
+    ai: {
+        enabled: boolean;
+        apiKey: string;
+        maxTokens: number;
     };
     logLevel: string[];
     action: {
@@ -14,7 +18,7 @@ export interface BotConfig {
         holdDuration: number;
         retryDelay: number;
     };
-    }
+}
 
 const CONFIG_FILE = './config.json';
 
@@ -46,10 +50,18 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         const host = (await ask(`Enter server IP [${existing?.client.host ?? '127.0.0.1'}]: `)) || existing?.client.host || '127.0.0.1';
         const port = (await ask(`Enter server port [${existing?.client.port ?? '25565'}]: `)) || existing?.client.port || '25565';
         const username = (await ask(`Enter bot username [${existing?.client.username ?? 'Bot'}]: `)) || existing?.client.username || 'Bot';
-        const version = (await ask(`Enter game version [${existing?.client.version ?? '1.20.4'}]: `)) || existing?.client.version || '1.20.4';
+        const enableAI = (await ask(`Enable AI features? (y/n) [${existing?.ai?.enabled ? 'y' : 'n'}]: `)).trim().toLowerCase() === 'y';
+        const apiKey = enableAI 
+            ? (await ask(`Enter Groq API key [${existing?.ai?.apiKey ? '***' : 'YOUR_GROQ_API'}]: `)) || existing?.ai?.apiKey || 'YOUR_GROQ_API'
+            : 'YOUR_GROQ_API';
 
         config = {
-            client: { host, port, username, version },
+            client: { host, port, username },
+            ai: {
+                enabled: enableAI,
+                apiKey,
+                maxTokens: existing?.ai?.maxTokens ?? 150
+            },
             logLevel: existing?.logLevel ?? ['error', 'log', 'debug'],
             action: existing?.action ?? {
                 commands: ['forward', 'back', 'left', 'right', 'jump'],

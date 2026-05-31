@@ -3,11 +3,11 @@ import pathfinderLib from 'mineflayer-pathfinder';
 import { sleep, getRandom } from "./utils.ts";
 import CONFIG from "../config.json" with { type: 'json' };
 import PERSONALITY from "../personality.json" with { type: 'json' };
-import readline from 'readline';
+import * as readline from 'readline';
 import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 const { pathfinder, Movements, goals } = pathfinderLib;
-const { GoalFollow } = goals;
+const { GoalFollow, GoalBlock, GoalGetToBlock } = goals;
 import Groq from 'groq-sdk';
 
 // Check if AI is enabled and API key is provided
@@ -542,7 +542,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
             const killTarget = args[0]?.toLowerCase();
             if (!killTarget) { bot.chat('Usage: gkill <mob|player name>'); break; }
 
-            function getBestWeapon() {
+            const getBestWeapon = () => {
                 const priorities = [
                     ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe'],
                     ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword']
@@ -554,9 +554,9 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                     }
                 }
                 return null;
-            }
+            };
 
-            const playerEntry = Object.values(bot.players).find(p => p.username?.toLowerCase() === killTarget);
+            const playerEntry = (Object.values(bot.players) as any[]).find(p => p.username?.toLowerCase() === killTarget);
             const killPlayerEntity = playerEntry?.entity;
 
             if (killPlayerEntity) {
@@ -587,7 +587,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                 break;
             }
 
-            const mobEntity = Object.values(bot.entities).find(e =>
+            const mobEntity = (Object.values(bot.entities) as any[]).find(e =>
                 e.type === 'mob' &&
                 e.name?.toLowerCase() === killTarget &&
                 HOSTILE_MOBS.has(e.name?.toLowerCase() ?? '')
@@ -666,7 +666,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
 
             const resourceTypes = resourceGroups[resourceType];
 
-            function getBestTool(blockName: string) {
+            const getBestTool = (blockName: string) => {
                 const block = mcData.blocksByName[blockName];
                 if (!block || !block.harvestTools) return null;
                 let bestTool = null;
@@ -681,9 +681,9 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                     }
                 }
                 return bestTool;
-            }
+            };
 
-            async function mineBlock(blockName: string, amountToMine = 1) {
+            const mineBlock = async (blockName: string, amountToMine = 1) => {
                 let collected = 0;
                 const blockId = mcData.blocksByName[blockName]?.id;
                 if (!blockId) return 0;
@@ -710,7 +710,7 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
                     await sleep(800);
                 }
                 return collected;
-            }
+            };
 
             if (currentState !== BotState.IDLE) { bot.chat(PERSONALITY.messages.busy); break; }
 
@@ -764,6 +764,7 @@ export const createBot = (
         host: config.ip,
         port: config.port,
         username: config.username,
+        version: (config as any).version || false  // false = auto-detect
     } as any);
 
     bot.loadPlugin(pathfinder);
@@ -828,14 +829,19 @@ export const createBot = (
             return;
         }
 
-        // Random chime into multi-player conversations
-        // BUG FIX: only chime when idle
+        // Only chime if message contains interesting topics for AI to discuss
         if (currentState !== BotState.IDLE) return;
-        const chimeNow = Date.now();
-        const shouldChime = Math.random() < 0.08 && (chimeNow - lastChimeTime > 2 * 60 * 1000);
-        if (shouldChime) {
-            lastChimeTime = chimeNow;
-            await handleAIResponse(username, message, 'chime');
+        
+        // Check if message is "interesting" - contains keywords relevant to AI personality
+        const isInteresting = PERSONALITY.interestingKeywords.some(keyword => msgLower.includes(keyword));
+        
+        if (isInteresting) {
+            const chimeNow = Date.now();
+            const enoughTimePassed = (chimeNow - lastChimeTime > 2 * 60 * 1000);
+            if (enoughTimePassed) {
+                lastChimeTime = chimeNow;
+                await handleAIResponse(username, message, 'chime');
+            }
         }
     });
 
@@ -845,7 +851,12 @@ export const createBot = (
         reconnectAttempts = 0;
         reconnecting = false;
         if (!bot?.entity) return;
-        console.log(`Logged in as ${bot.username}`);
+        
+        // Get the actual server version from config that was used to connect
+        const serverVersion = (currentConfig as any)?.version || bot.version;
+        
+        console.log(`🤖 Bot logged in as ${bot.username}`);
+        //console.log(`🌍 Server version: ${serverVersion}`);
         console.log(`[AI Status] ${AI_ENABLED ? '✓ AI Features ENABLED' : '✗ AI Features DISABLED (basic commands only)'}`);
         bot.pathfinder.setMovements(getSafeMovements());
 
@@ -1006,7 +1017,6 @@ export const createBot = (
     });
 
     bot.once('login', () => {
-        console.log(`Bot logged in as ${bot.username} on version ${bot.version}\n`);
         bot.setMaxListeners(35);
         if (AI_ENABLED) {
             setTimeout(() => bot.chat(PERSONALITY.messages.login), 500);

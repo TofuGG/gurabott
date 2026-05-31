@@ -46,3 +46,4 @@ src/bot_old*
 *_old.ts
 temp/
 tmp/
+tsc_errors.txt

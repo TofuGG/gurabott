@@ -1,17 +1,66 @@
 import HTTP from 'node:http';
 
-const PORT = process.PORT || 5500;
-const server = HTTP.createServer((request, response) => {
-	response.writeHead(200, {
-		"Access-Control-Allow-Origin": "https://replit.com",
-		"Access-Control-Allow-Methods": "GET, PING, OPTIONS",
-		"Content-Type": "text/html"
-	} as const);
-	response.end(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gawr Gura Website</title><style>body{background-color:#000;color:#add8e6;margin:0;padding:0;font-family:Arial,sans-serif;text-align:center}img{max-width:100%;height:auto}</style></head><body><h1>Welcome to the Gawr Gura Website!</h1><p>This is a simple website dedicated to Gawr Gura, a popular VTuber.</p><img src="https://cdn.discordapp.com/attachments/1186717234719105035/1197952567825678416/qMXdJs6.png?ex=65cf9845&is=65bd2345&hm=b94e68dd0bbf3fcae4ce2deb&" alt="Gawr Gura Image"></body></html>`);
-});
-
-
+const PORT = process.env.PORT || 5500;
 
 export default (): void => {
-	server.listen(PORT, () => console.log("Server for UptimeRobot is ready!"));
+	const server = HTTP.createServer((request, response) => {
+		// Health check endpoint for monitoring services
+		if (request.url === '/health' || request.url === '/') {
+			response.writeHead(200, {
+				"Content-Type": "application/json",
+				"Access-Control-Allow-Origin": "*",
+				"Access-Control-Allow-Methods": "GET, OPTIONS"
+			});
+			response.end(JSON.stringify({
+				status: 'online',
+				service: 'Gurabott',
+				timestamp: new Date().toISOString(),
+				uptime: process.uptime()
+			}));
+		} else if (request.url === '/status') {
+			// Status page for monitoring
+			response.writeHead(200, {
+				"Content-Type": "text/html",
+				"Cache-Control": "no-cache"
+			});
+			response.end(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Gurabott Status</title>
+	<style>
+		body { background: #1a1a1a; color: #00d4ff; font-family: monospace; padding: 20px; }
+		.container { max-width: 600px; margin: 0 auto; }
+		.status { padding: 20px; background: #0a0a0a; border: 2px solid #00d4ff; border-radius: 5px; }
+		h1 { margin: 0; }
+		.info { margin-top: 10px; font-size: 14px; }
+	</style>
+</head>
+<body>
+	<div class="container">
+		<div class="status">
+			<h1>🤖 Gurabott Status</h1>
+			<div class="info">
+				<p>✓ Bot is running</p>
+				<p>Uptime: ${Math.floor(process.uptime())}s</p>
+				<p>Timestamp: ${new Date().toISOString()}</p>
+			</div>
+		</div>
+	</div>
+</body>
+</html>
+			`);
+		} else {
+			response.writeHead(404, { "Content-Type": "text/plain" });
+			response.end('Not Found');
+		}
+	});
+
+	server.listen(PORT, () => {
+		console.log(`\n🌐 Health check server running on http://localhost:${PORT}`);
+		console.log(`   GET ${PORT}/health - JSON status`);
+		console.log(`   GET ${PORT}/status - HTML status page\n`);
+	});
 };
