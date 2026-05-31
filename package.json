@@ -8,11 +8,13 @@
     "dev": "node --inspect --loader tsx ./src/index.ts"
   },
   "dependencies": {
+    "canvas": "^3.2.3",
     "groq-sdk": "^1.1.2",
     "minecraft-data": "^3.110.0",
     "minecraft-protocol": "^1.66.1",
     "mineflayer": "github:PrismarineJS/mineflayer",
     "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-viewer": "^1.33.0",
     "tsx": "^4.21.0"
   },
   "main": "index.js",

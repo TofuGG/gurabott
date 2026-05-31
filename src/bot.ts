@@ -756,7 +756,8 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
 
 export const createBot = (
     config: { ip: string; port: number; username: string },
-    rl: readline.Interface
+    rl: readline.Interface,
+    mineflayerViewer?: any
 ): void => {
     currentConfig = config;
     rlInstance = rl;
@@ -858,6 +859,17 @@ export const createBot = (
         console.log(`🤖 Bot logged in as ${bot.username}`);
         //console.log(`🌍 Server version: ${serverVersion}`);
         console.log(`[AI Status] ${AI_ENABLED ? '✓ AI Features ENABLED' : '✗ AI Features DISABLED (basic commands only)'}`);
+        
+        // Initialize prismarine-viewer for live bot viewing (if available)
+        if (mineflayerViewer) {
+            try {
+                mineflayerViewer(bot, { port: 3007, firstPerson: false });
+                console.log(`👁️  Viewer running on http://localhost:3007`);
+            } catch (err) {
+                console.warn('⚠️  Could not start viewer:', (err as any).message);
+            }
+        }
+        
         bot.pathfinder.setMovements(getSafeMovements());
 
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);

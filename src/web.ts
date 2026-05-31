@@ -33,9 +33,11 @@ export default (): void => {
 	<style>
 		body { background: #1a1a1a; color: #00d4ff; font-family: monospace; padding: 20px; }
 		.container { max-width: 600px; margin: 0 auto; }
-		.status { padding: 20px; background: #0a0a0a; border: 2px solid #00d4ff; border-radius: 5px; }
+		.status { padding: 20px; background: #0a0a0a; border: 2px solid #00d4ff; border-radius: 5px; margin-bottom: 20px; }
 		h1 { margin: 0; }
 		.info { margin-top: 10px; font-size: 14px; }
+		a { color: #00d4ff; text-decoration: none; }
+		a:hover { text-decoration: underline; }
 	</style>
 </head>
 <body>
@@ -46,6 +48,13 @@ export default (): void => {
 				<p>✓ Bot is running</p>
 				<p>Uptime: ${Math.floor(process.uptime())}s</p>
 				<p>Timestamp: ${new Date().toISOString()}</p>
+			</div>
+		</div>
+		<div class="status">
+			<h1>👁️ Viewer</h1>
+			<div class="info">
+				<p><a href="http://localhost:3007" target="_blank">Open Live Bot Viewer →</a></p>
+				<p style="font-size: 12px; color: #888;">View real-time bot movement and surroundings</p>
 			</div>
 		</div>
 	</div>
@@ -61,6 +70,7 @@ export default (): void => {
 	server.listen(PORT, () => {
 		console.log(`\n🌐 Health check server running on http://localhost:${PORT}`);
 		console.log(`   GET ${PORT}/health - JSON status`);
-		console.log(`   GET ${PORT}/status - HTML status page\n`);
+		console.log(`   GET ${PORT}/status - HTML status page`);
+		console.log(`   GET 3007 - Live bot viewer\n`);
 	});
 };

@@ -10,6 +10,20 @@ const rl = readline.createInterface({
 });
 
 async function main() {
+    // Load prismarine-viewer first (before config prompt)
+    let mineflayerViewer: any = null;
+    try {
+        const viewer = await import('prismarine-viewer');
+        mineflayerViewer = viewer.default?.mineflayer || viewer.mineflayer || viewer.default;
+        if (mineflayerViewer) {
+            console.log('✓ prismarine-viewer loaded');
+        }
+    } catch (err) {
+        console.warn('⚠️  prismarine-viewer not available:', (err as any).message);
+    }
+    
+    console.log(''); // blank line for spacing
+    
     // Load config once, pass the rl
     const config = await loadConfig(rl);
 
@@ -21,7 +35,7 @@ async function main() {
         ip: config.client.host,
         port: parseInt(config.client.port, 10),
         username: config.client.username
-    }, rl); // pass rl so bot commands work
+    }, rl, mineflayerViewer); // pass rl and viewer
 }
 
 // Run the main function
