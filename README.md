@@ -26,13 +26,13 @@ The default personality is inspired by **Hatsune Miku**, but you can easily cust
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  💬 Natural Conversations                              │
-│  🎯 Intelligent Command Execution                       │
-│  📦 Resource Collection & Management                    │
-│  ⚔️  Combat System (Mobs & Players)                     │
+│  🎯 Intelligent Command Execution                      │
+│  📦 Resource Collection & Management                   │
+│  ⚔️  Combat System (Mobs & Players)                    │
 │  🏠 Environment Interaction (Doors, Beds, Crafting)    │
 │  🧭 Advanced Pathfinding                               │
-│  🔄 Auto-Reconnection                                   │
-│  ⚙️  Fully Customizable Personality                     │
+│  🔄 Auto-Reconnection                                  │
+│  ⚙️  Fully Customizable Personality                    │
 └─────────────────────────────────────────────────────────┘
 ```
 
