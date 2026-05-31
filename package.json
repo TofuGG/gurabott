@@ -8,6 +8,7 @@
     "dev": "node --inspect --loader tsx ./src/index.ts"
   },
   "dependencies": {
+    "blessed": "^0.1.81",
     "canvas": "^3.2.3",
     "groq-sdk": "^1.1.2",
     "minecraft-data": "^3.110.0",
@@ -23,6 +24,7 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@types/blessed": "^0.1.27",
     "cross-env": "^10.1.0",
     "typescript": "^5.9.3"
   }
