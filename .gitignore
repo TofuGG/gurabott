@@ -47,3 +47,4 @@ src/bot_old*
 temp/
 tmp/
 tsc_errors.txt
+data/

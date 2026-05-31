@@ -9,7 +9,9 @@ import { Vec3 } from 'vec3';
 const { pathfinder, Movements} = pathfinderLib;
 const { goals } = pathfinderLib;
 const { GoalFollow, GoalBlock, GoalGetToBlock } = goals;
-import { startStuckDetector } from './stuckDetector.ts'
+import { startStuckDetector } from './stuckDetector.ts';
+import { startMovementAI } from './movementAI.ts';
+import { MapMemory } from './mapMemory.ts';
 import Groq from 'groq-sdk';
 
 // Check if AI is enabled and API key is provided
@@ -25,6 +27,7 @@ let collecting = false;
 let collectedSummary: { [key: string]: number } = {};
 let intervals: NodeJS.Timeout[] = [];
 let lastFleeTime = 0;
+let isEscapingStuck = false;
 let lastChimeTime = 0;
 let lastHurtMessageTime = 0;
 
@@ -56,31 +59,6 @@ function setState(newState: BotState) {
     } catch {}
 }
 
-function randomNearbyGround(bot: Mineflayer.Bot, minDist: number, maxDist: number): Vec3 | null {
-    const pos = bot.entity.position;
-    for (let attempt = 0; attempt < 10; attempt++) {
-        const angle = Math.random() * Math.PI * 2;
-        const dist = minDist + Math.random() * (maxDist - minDist);
-        const tx = Math.floor(pos.x + Math.cos(angle) * dist);
-        const tz = Math.floor(pos.z + Math.sin(angle) * dist);
-        // scan a few blocks up/down for solid ground
-        for (let dy = 3; dy >= -3; dy--) {
-            const ty = Math.floor(pos.y) + dy;
-            const block = bot.blockAt(new Vec3(tx, ty - 1, tz));
-            const space1 = bot.blockAt(new Vec3(tx, ty, tz));
-            const space2 = bot.blockAt(new Vec3(tx, ty + 1, tz));
-            if (
-                block && block.boundingBox === 'block' &&
-                !block.name.includes('water') &&
-                (!space1 || space1.boundingBox === 'empty') &&
-                (!space2 || space2.boundingBox === 'empty')
-            ) {
-                return new Vec3(tx, ty, tz);
-            }
-        }
-    }
-    return null;
-}
 
 const disconnect = (): void => {
     for (const i of intervals) clearInterval(i);
@@ -159,8 +137,9 @@ function getSafeMovements() {
     movements.allowParkour = true;
     movements.allowSprinting = true;
     movements.canOpenDoors = true;
-    // Tells pathfinder to actually interact with blocks (doors, trapdoors, etc.)
     (movements as any).interactWithBlocks = true;
+    // Make water tiles very expensive so pathfinder avoids walking into them
+    (movements as any).liquidCost = 100;
     
     return movements;
 }
@@ -785,7 +764,8 @@ const handleChatCommand = async (username: string, rawMessage: string) => {
 export const createBot = (
     config: { ip: string; port: number; username: string },
     rl: readline.Interface,
-    mineflayerViewer?: any
+    mineflayerViewer?: any,
+    memory?: MapMemory
 ): void => {
     currentConfig = config;
     rlInstance = rl;
@@ -803,11 +783,32 @@ export const createBot = (
 
     bot.on('end', (reason) => {
         console.log('Connection ended:', reason);
+        memory?.forceSave();
         reconnect();
     });
 
     bot.on('kicked', (reason, loggedIn) => {
         console.error('Kicked. Reason:', reason, '| Logged in:', loggedIn);
+    });
+
+    bot.on('death', () => {
+        const pos = bot.entity?.position;
+        if (!pos) return;
+        console.log(`[Bot] Died at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
+        memory?.recordDeath(pos, bot.health ?? 0);
+    });
+
+    bot.on('spawn', () => {
+        // After respawn, hold idle for 5s so the bot doesn't immediately
+        // wander back toward the death spot before memory kicks in
+        const prevState = currentState;
+        setState(BotState.IDLE);
+        clearAllControls(bot);
+        try { bot.pathfinder?.setGoal(null); } catch {}
+        console.log('[Bot] Respawned — holding position for 5s');
+        setTimeout(() => {
+            if (currentState === BotState.IDLE) setState(BotState.IDLE); // re-trigger any idle hooks
+        }, 5000);
     });
 
     bot.on('entityHurt', (entity) => {
@@ -899,8 +900,7 @@ export const createBot = (
         }
         
         bot.pathfinder.setMovements(getSafeMovements());
-        startStuckDetector(bot);
-
+        
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
         await sleep(1000);
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
@@ -973,93 +973,16 @@ export const createBot = (
                 }
             }
         }, 1000));
-
-        // Idle wander interval
-        // Natural idle wander
-        let wandering = false;
-        const naturalWander = async (): Promise<void> => {
-            if (!bot?.entity || currentState !== BotState.IDLE || wandering) return;
-            wandering = true;
-
-            try {
-                const roll = Math.random();
-
-                if (roll < 0.15) {
-                    // 15%: just stand still and look around slowly, like daydreaming
-                    const lookCount = 1 + Math.floor(Math.random() * 3);
-                    for (let i = 0; i < lookCount; i++) {
-                        if (currentState !== BotState.IDLE) break;
-                        const yaw = Math.random() * Math.PI * 2;
-                        const pitch = (Math.random() * 0.8) - 0.3; // mostly horizontal
-                        try { await bot.look(yaw, pitch, false); } catch {}
-                        await sleep(800 + Math.random() * 1200);
-                    }
-
-                } else if (roll < 0.35) {
-                    // 20%: short stroll 3-8 blocks away
-                    const dest = randomNearbyGround(bot, 3, 8);
-                    if (dest) {
-                        bot.pathfinder.setMovements(getSafeMovements());
-                        try {
-                            await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z));
-                        } catch {}
-                        // pause and look around after arriving
-                        await sleep(500 + Math.random() * 1000);
-                        try { await bot.look(Math.random() * Math.PI * 2, 0, false); } catch {}
-                    }
-
-                } else if (roll < 0.70) {
-                    // 35%: proper walk 8-20 blocks away, maybe sprint partway
-                    const dest = randomNearbyGround(bot, 8, 20);
-                    if (dest) {
-                        const movements = getSafeMovements();
-                        movements.allowSprinting = Math.random() < 0.4; // sprint 40% of walks
-                        bot.pathfinder.setMovements(movements);
-                        try {
-                            await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z));
-                        } catch {}
-                        await sleep(300 + Math.random() * 800);
-                    }
-
-                } else if (roll < 0.85) {
-                    // 15%: walk then stop midway and look at something (distracted)
-                    const dest = randomNearbyGround(bot, 5, 15);
-                    if (dest) {
-                        bot.pathfinder.setMovements(getSafeMovements());
-                        // set goal but cancel it partway
-                        bot.pathfinder.setGoal(new goals.GoalBlock(dest.x, dest.y, dest.z));
-                        await sleep(1000 + Math.random() * 2000);
-                        bot.pathfinder.setGoal(null);
-                        clearAllControls(bot);
-                        // look around as if distracted
-                        try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.6) - 0.1, false); } catch {}
-                        await sleep(600 + Math.random() * 800);
-                    }
-
-                } else {
-                    // 15%: crouch briefly then stand (fidgeting)
-                    bot.setControlState('sneak', true);
-                    await sleep(400 + Math.random() * 600);
-                    bot.setControlState('sneak', false);
-                }
-
-            } finally {
-                clearAllControls(bot);
-                wandering = false;
-            }
-        };
-
-        // Vary the wander interval between 4-10s for unpredictability
-        const scheduleWander = () => {
-            if (!bot?.entity) return;
-            const delay = 4000 + Math.random() * 6000;
-            const t = setTimeout(async () => {
-                await naturalWander();
-                scheduleWander(); // reschedule after each wander completes
-            }, delay);
-            intervals.push(t as any);
-        };
-        scheduleWander();
+        let onStuckCallback: (() => void) | null = null;
+        startMovementAI(
+            bot, () => currentState, getSafeMovements, HOSTILE_MOBS, intervals,
+            () => isEscapingStuck, memory,
+            (cb) => { onStuckCallback = cb; }
+        );
+        startStuckDetector(bot, (v) => {
+            isEscapingStuck = v;
+            if (v && onStuckCallback) onStuckCallback(); // notify movement AI
+        });
     });
 
     bot.on('playerJoined', (player) => {

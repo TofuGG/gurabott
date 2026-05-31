@@ -6,7 +6,7 @@ import { Vec3 } from 'vec3';
 const STUCK_TICK_THRESHOLD = 60;
 const MOVE_MIN = 0.06;
 
-export function startStuckDetector(bot: Bot) {
+export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void) {
     let lastPos: Vec3 = bot.entity?.position.clone() ?? new Vec3(0, 0, 0);
     let stuckTicks = 0;
     let escaping = false;
@@ -38,6 +38,7 @@ export function startStuckDetector(bot: Bot) {
 
     async function unstuck(bot: Bot, stuckPos: Vec3) {
         escaping = true;
+        setEscaping?.(true);
         console.log('[STUCK] Detected stuck at', stuckPos.toString(), '— escaping');
 
         try {
@@ -74,6 +75,7 @@ export function startStuckDetector(bot: Bot) {
             }
 
             escaping = false;
+            setEscaping?.(false);
             console.log('[STUCK] Escape complete');
         }
     }
