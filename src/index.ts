@@ -20,8 +20,7 @@ async function main() {
     createBot({
         ip: config.client.host,
         port: parseInt(config.client.port, 10),
-        username: config.client.username,
-        version: config.client.version
+        username: config.client.username
     }, rl); // pass rl so bot commands work
 }
 

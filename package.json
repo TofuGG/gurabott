@@ -8,8 +8,9 @@
     "dev": "node --inspect --loader tsx ./src/index.ts"
   },
   "dependencies": {
-    "minecraft-data": "^3.105.0",
-    "minecraft-protocol": "^1.64.0",
+    "groq-sdk": "^1.1.2",
+    "minecraft-data": "^3.110.0",
+    "minecraft-protocol": "^1.66.1",
     "mineflayer": "github:PrismarineJS/mineflayer",
     "mineflayer-pathfinder": "^2.4.5",
     "tsx": "^4.21.0"
@@ -24,4 +25,3 @@
     "typescript": "^5.9.3"
   }
 }
-
