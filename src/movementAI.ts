@@ -300,11 +300,13 @@ async function doDistractedWalk(bot: Mineflayer.Bot, getSafeMovements: () => any
     const dest = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
     bot.pathfinder.setMovements(getSafeMovements());
+    // Walk then stop partway — no artificial delay, just cancel goal mid-walk
     bot.pathfinder.setGoal(new goals.GoalBlock(dest.x, dest.y, dest.z));
-    await sleep(800 + Math.random() * 2200); // stop partway
-    bot.pathfinder.setGoal(null);
+    await new Promise<void>(resolve => {
+        const t = setTimeout(() => { bot.pathfinder.setGoal(null); resolve(); }, 1200 + Math.random() * 1800);
+        bot.once('goal_reached', () => { clearTimeout(t); resolve(); });
+    });
     try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.5) - 0.1, false); } catch {}
-    await sleep(700 + Math.random() * 900);
 }
 
 async function doCrouchFidget(bot: Mineflayer.Bot) {
@@ -329,23 +331,20 @@ async function doLookAtPlayer(bot: Mineflayer.Bot) {
 
 async function doLookAtSky(bot: Mineflayer.Bot) {
     const yaw = Math.random() * Math.PI * 2;
-    const pitch = -(0.6 + Math.random() * 0.8); // look up
+    const pitch = -(0.6 + Math.random() * 0.8);
     try { await bot.look(yaw, pitch, false); } catch {}
     await sleep(1200 + Math.random() * 2000);
-    // slowly come back to horizon
     try { await bot.look(yaw + (Math.random() * 0.4 - 0.2), -0.1, false); } catch {}
     await sleep(600);
 }
 
 async function doPaceBackForth(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory, minDist = 3, maxDist = 6) {
-    const dest = randomNearbyGround(bot, minDist, maxDist, memory);
+    const dest   = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
     const origin = randomNearbyGround(bot, 0, 1) ?? bot.entity.position.clone().floored();
     bot.pathfinder.setMovements(getSafeMovements());
     try { await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z)); } catch {}
-    await sleep(300 + Math.random() * 400);
     try { await bot.pathfinder.goto(new goals.GoalBlock(Math.round(origin.x), Math.round(origin.y), Math.round(origin.z))); } catch {}
-    await sleep(300);
 }
 
 async function doCircleSpot(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory) {
@@ -362,7 +361,6 @@ async function doCircleSpot(bot: Mineflayer.Bot, getSafeMovements: () => any, me
         const dest = randomNearbyGround(bot, 0, 1) ?? new Vec3(tx, Math.round(pos.y), tz);
         const target = new Vec3(tx, Math.round(pos.y), tz);
         try { await bot.pathfinder.goto(new goals.GoalBlock(target.x, target.y, target.z)); } catch {}
-        await sleep(200 + Math.random() * 400);
     }
 }
 
@@ -467,7 +465,7 @@ export function startMovementAI(
                     distracted_walk: 0, pace_back_forth: 5, circle_spot: 0,
                 };
                 const behavior = pickWeighted(stationaryOnly);
-                console.log(`[MovementAI] ${behavior} (tiny island, safeRadius=${safeRadius})`);
+                // console.log(`[MovementAI] ${behavior} (tiny island, safeRadius=${safeRadius})`);
 
                 stuckDuringBehavior = false;
                 const startPos = bot.entity.position.clone();
@@ -492,7 +490,7 @@ export function startMovementAI(
             };
 
             const behavior = pickWeighted(merged);
-            console.log(`[MovementAI] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
+            // console.log(`[MovementAI] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
 
             stuckDuringBehavior = false;
             const startPos = bot.entity.position.clone();
@@ -548,7 +546,7 @@ export function startMovementAI(
 
             return behavior;
         } catch (err) {
-            console.warn('[MovementAI] tick error:', (err as any).message);
+            // console.warn('[MovementAI] tick error:', (err as any).message);
             return null;
         } finally {
             if (trackFall) bot.off('physicsTick', trackFall);

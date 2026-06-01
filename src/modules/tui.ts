@@ -1,10 +1,16 @@
 /**
  * tui.ts - Interactive terminal UI for Gurabott
- * Full-featured TUI with live stats, chat log, command input, and bot controls.
+ *
+ * Windows Terminal / PowerShell double-input fix:
+ *  - process.stdin.setRawMode(true) before blessed starts stops the terminal
+ *    from echoing characters on its own.
+ *  - We do NOT use blessed.textbox at all. Input is a plain Box widget whose
+ *    content we manage manually from screen.on('keypress').
+ *  - screen.program.disableGpm() suppresses any secondary mouse/input daemon.
  */
 
 import blessed from 'blessed';
-import { BotState, getState, onStateChange } from './state.js';
+import { BotState, getState, onStateChange } from './state.ts';
 import type { Bot } from 'mineflayer';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -14,648 +20,420 @@ export interface TUILog {
     text: string;
     ts: number;
 }
-
 type CommandHandler = (cmd: string, args: string[]) => void | Promise<void>;
 
-// ── Colors ────────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-const C = {
-    border:    '{bold}{cyan-fg}',
-    title:     '{bold}{white-fg}',
-    chat:      '{white-fg}',
-    system:    '{cyan-fg}',
-    error:     '{red-fg}',
-    state:     '{yellow-fg}',
-    ai:        '{magenta-fg}',
-    movement:  '{green-fg}',
-    warn:      '{yellow-fg}',
-    label:     '{bold}{cyan-fg}',
-    value:     '{white-fg}',
-    good:      '{green-fg}',
-    bad:       '{red-fg}',
-    neutral:   '{yellow-fg}',
-};
+const RIGHT_W = 28;
+const HEADER_H = 3;
+const INPUT_H = 3;
+const CMD_H = 16;
 
-function typeColor(type: TUILog['type']): string {
-    const map: Record<TUILog['type'], string> = {
-        chat:     C.chat,
-        system:   C.system,
-        error:    C.error,
-        state:    C.state,
-        ai:       C.ai,
-        movement: C.movement,
-        warn:     C.warn,
-    };
-    return map[type] ?? C.chat;
-}
+const COMMANDS: { label: string; cmd: string }[] = [
+    { label: 'gping       - ping',        cmd: 'gping'      },
+    { label: 'gfollow <p> - follow',      cmd: 'gfollow '   },
+    { label: 'gsfollow    - stop',        cmd: 'gsfollow'   },
+    { label: 'gcollect <r>- collect',     cmd: 'gcollect '  },
+    { label: 'gscollect   - stop',        cmd: 'gscollect'  },
+    { label: 'gsleep      - sleep',       cmd: 'gsleep'     },
+    { label: 'gkill <t>   - attack',      cmd: 'gkill '     },
+    { label: 'gcraft <i>  - craft',       cmd: 'gcraft '    },
+    { label: 'ginvsee     - inventory',   cmd: 'ginvsee'    },
+    { label: 'gdump       - drop all',    cmd: 'gdump'      },
+    { label: 'gcords      - coords',      cmd: 'gcords'     },
+    { label: 'gopendoor   - door',        cmd: 'gopendoor'  },
+    { label: 'gsurv       - survival',    cmd: 'gsurv'      },
+    { label: 'gsurv stop  - stop surv',   cmd: 'gsurv stop' },
+    { label: 'gsay <msg>  - chat',        cmd: 'gsay '      },
+    { label: 'ghelp       - all cmds',    cmd: 'ghelp'      },
+];
 
-function typeBadge(type: TUILog['type']): string {
-    const badges: Record<TUILog['type'], string> = {
-        chat:     '{bold}{white-fg}[CHAT]{/bold}{/white-fg}',
-        system:   '{bold}{cyan-fg}[SYS]{/bold}{/cyan-fg}',
-        error:    '{bold}{red-fg}[ERR]{/bold}{/red-fg}',
-        state:    '{bold}{yellow-fg}[STATE]{/bold}{/yellow-fg}',
-        ai:       '{bold}{magenta-fg}[AI]{/bold}{/magenta-fg}',
-        movement: '{bold}{green-fg}[MOV]{/bold}{/green-fg}',
-        warn:     '{bold}{yellow-fg}[WARN]{/bold}{/yellow-fg}',
-    };
-    return badges[type] ?? '{white-fg}[???]{/white-fg}';
-}
+const SUPPRESSED = ['[STUCK]', '[MovementAI]'];
+function isSuppressed(text: string) { return SUPPRESSED.some(p => text.includes(p)); }
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── Module state ──────────────────────────────────────────────────────────────
 
-let screen: blessed.Widgets.Screen | null = null;
-let logBox: blessed.Widgets.Log | null = null;
-let statsBox: blessed.Widgets.Box | null = null;
-let inputBox: blessed.Widgets.Textbox | null = null;
-let cmdList: blessed.Widgets.List | null = null;
-let headerBox: blessed.Widgets.Box | null = null;
-let footerBox: blessed.Widgets.Box | null = null;
-let helpBox: blessed.Widgets.Box | null = null;
+let screen:   blessed.Widgets.Screen | null = null;
+let logBox:   blessed.Widgets.Log    | null = null;
+let statsBox: blessed.Widgets.Box    | null = null;
+let inputBox: blessed.Widgets.Box    | null = null;
+let cmdList:  blessed.Widgets.List   | null = null;
+let headerBox:blessed.Widgets.Box    | null = null;
+let helpBox:  blessed.Widgets.Box    | null = null;
 
-let botRef: Bot | null = null;
+let botRef:         Bot | null         = null;
 let commandHandler: CommandHandler | null = null;
-let inputHistory: string[] = [];
-let historyIndex = -1;
-let logs: TUILog[] = [];
-let statsUpdateInterval: NodeJS.Timeout | null = null;
-let inputBuffer = '';
-let showHelp = false;
-let connected = false;
-let aiEnabled = false;
-let serverInfo = '';
-
-const MAX_LOGS = 500;
+let inputHistory:   string[]           = [];
+let historyIdx      = -1;
+let inputBuf        = '';
+let showHelp        = false;
+let connected       = false;
+let aiEnabled       = false;
+let serverInfo      = '';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function hpColor(hp: number): string {
-    if (hp > 14) return '{green-fg}';
-    if (hp > 7) return '{yellow-fg}';
-    return '{red-fg}';
-}
+const hpColor   = (v: number) => v > 14 ? '{green-fg}' : v > 7 ? '{yellow-fg}' : '{red-fg}';
+const foodColor = (v: number) => v > 14 ? '{green-fg}' : v > 7 ? '{yellow-fg}' : '{red-fg}';
+const hpBar     = (v: number, max = 20) => { const f = Math.round((v/max)*10); return '█'.repeat(f)+'░'.repeat(10-f); };
+const uptime    = (s: number) => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60); return h?`${h}h ${m}m`:`${m}m ${sec}s`; };
+const end       = (c: string) => c.replace('{','{/');
 
-function foodColor(food: number): string {
-    if (food > 14) return '{green-fg}';
-    if (food > 7) return '{yellow-fg-}';
-    return '{red-fg}';
-}
+const STATE_COLORS: Record<BotState, string> = {
+    [BotState.IDLE]:       '{green-fg}',
+    [BotState.FOLLOWING]:  '{cyan-fg}',
+    [BotState.COLLECTING]: '{yellow-fg}',
+    [BotState.FLEEING]:    '{red-fg}',
+    [BotState.EATING]:     '{magenta-fg}',
+    [BotState.SLEEPING]:   '{blue-fg}',
+    [BotState.ATTACKING]:  '{red-fg}',
+};
 
-function hpBar(value: number, max = 20): string {
-    const filled = Math.round((value / max) * 10);
-    const empty = 10 - filled;
-    return '█'.repeat(filled) + '░'.repeat(empty);
-}
+const BADGES: Record<TUILog['type'], string> = {
+    chat:     '{bold}{white-fg}[CHAT]{/white-fg}{/bold}',
+    system:   '{bold}{cyan-fg}[SYS]{/cyan-fg}{/bold}',
+    error:    '{bold}{red-fg}[ERR]{/red-fg}{/bold}',
+    state:    '{bold}{yellow-fg}[STATE]{/yellow-fg}{/bold}',
+    ai:       '{bold}{magenta-fg}[AI]{/magenta-fg}{/bold}',
+    movement: '{bold}{green-fg}[MOV]{/green-fg}{/bold}',
+    warn:     '{bold}{yellow-fg}[WARN]{/yellow-fg}{/bold}',
+};
+const COLORS: Record<TUILog['type'], string> = {
+    chat: '{white-fg}', system: '{cyan-fg}', error: '{red-fg}',
+    state: '{yellow-fg}', ai: '{magenta-fg}', movement: '{green-fg}', warn: '{yellow-fg}',
+};
 
-function stateColor(s: BotState): string {
-    const map: Record<BotState, string> = {
-        [BotState.IDLE]:      '{green-fg}',
-        [BotState.FOLLOWING]: '{cyan-fg}',
-        [BotState.COLLECTING]:'{yellow-fg}',
-        [BotState.FLEEING]:   '{red-fg}',
-        [BotState.EATING]:    '{magenta-fg}',
-        [BotState.SLEEPING]:  '{blue-fg}',
-        [BotState.ATTACKING]: '{red-fg}',
-    };
-    return map[s] ?? '{white-fg}';
+function buildHeader() {
+    const ai = aiEnabled ? '{green-fg}[AI ON]{/green-fg}' : '{red-fg}[AI OFF]{/red-fg}';
+    return ` {bold}{cyan-fg}🤖 GURABOTT{/bold}{/cyan-fg}  ${ai}  {white-fg}${serverInfo}{/white-fg}`;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-export function initTUI(opts: {
-    onCommand: CommandHandler;
-    aiEnabled: boolean;
-    serverInfo: string;
-}): void {
+export function initTUI(opts: { onCommand: CommandHandler; aiEnabled: boolean; serverInfo: string }): void {
     commandHandler = opts.onCommand;
-    aiEnabled = opts.aiEnabled;
-    serverInfo = opts.serverInfo;
+    aiEnabled      = opts.aiEnabled;
+    serverInfo     = opts.serverInfo;
+
+    // ── Key fix for Windows Terminal double-echo ──────────────────────────────
+    // Put stdin into raw mode BEFORE blessed creates its own program.
+    // This prevents the terminal from echoing characters independently.
+    if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(true); } catch {}
+    }
+    process.stdin.resume();
 
     screen = blessed.screen({
-        smartCSR: true,
-        title: 'Gurabott',
+        smartCSR:    true,
+        title:       'Gurabott',
         fullUnicode: true,
-        forceUnicode: true,
         dockBorders: true,
-        autoPadding: true,
+        autoPadding: false,
+        // Do NOT set terminal: 'xterm' — let blessed detect it
     });
+
+    // Disable GPM mouse daemon (can cause duplicate events on some terminals)
+    try { (screen as any).program?.disableGpm?.(); } catch {}
+
+    screen.enableMouse();
 
     buildLayout();
-    setupInput();
-    setupKeys();
+    setupKeypress();
 
-    onStateChange((prev, next) => {
-        addLog('state', `State: ${prev} → ${next}`);
-        renderStats();
-    });
-
+    onStateChange((_p, n) => { addLog('state', `State → ${n}`); renderStats(); });
     screen.render();
-    setInterval(() => renderStats(), 1000);
+    setInterval(renderStats, 1500);
 }
+
+// ── Layout ────────────────────────────────────────────────────────────────────
 
 function buildLayout(): void {
     if (!screen) return;
 
-    // ── Header ──────────────────────────────────────────────────────────────
     headerBox = blessed.box({
-        parent: screen,
-        top: 0,
-        left: 0,
-        width: '100%',
-        height: 3,
-        content: buildHeader(),
-        tags: true,
-        style: {
-            fg: 'cyan',
-            bg: 'black',
-            border: { fg: 'cyan' },
-        },
-        border: { type: 'line' },
+        parent: screen, top: 0, left: 0, width: '100%', height: HEADER_H,
+        content: buildHeader(), tags: true, border: { type: 'line' },
+        style: { fg: 'cyan', bg: 'black', border: { fg: 'cyan' } },
     });
 
-    // ── Stats panel (right column) ───────────────────────────────────────────
+    logBox = blessed.log({
+        parent: screen, top: HEADER_H, left: 0, right: RIGHT_W, bottom: INPUT_H,
+        label: ' {bold}Log{/bold} ', tags: true, border: { type: 'line' },
+        style: { fg: 'white', bg: 'black', border: { fg: 'cyan' }, label: { fg: 'cyan', bold: true } },
+        scrollable: true, alwaysScroll: true, mouse: true,
+        scrollbar: { ch: '│', track: { bg: 'black' }, style: { bg: 'cyan' } },
+        padding: { left: 1, right: 0, top: 0, bottom: 0 },
+    });
+
     statsBox = blessed.box({
-        parent: screen,
-        top: 3,
-        right: 0,
-        width: 28,
-        height: '100%-8',
-        content: '',
-        tags: true,
-        label: ' {bold}Stats{/bold} ',
-        border: { type: 'line' },
-        style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'cyan' },
-            label: { fg: 'cyan', bold: true },
-        },
-        scrollable: false,
+        parent: screen, top: HEADER_H, right: 0, width: RIGHT_W, bottom: INPUT_H + CMD_H,
+        label: ' {bold}Stats{/bold} ', tags: true, border: { type: 'line' },
+        style: { fg: 'white', bg: 'black', border: { fg: 'cyan' }, label: { fg: 'cyan', bold: true } },
         padding: { left: 1, right: 1, top: 0, bottom: 0 },
     });
 
-    // ── Command quick-list (right column, bottom of stats) ───────────────────
     cmdList = blessed.list({
-        parent: screen,
-        bottom: 5,
-        right: 0,
-        width: 28,
-        height: 14,
-        label: ' {bold}Commands{/bold} ',
-        tags: true,
-        border: { type: 'line' },
+        parent: screen, right: 0, width: RIGHT_W, bottom: INPUT_H, height: CMD_H,
+        label: ' {bold}Commands{/bold} ', tags: true, border: { type: 'line' },
         style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'blue' },
-            label: { fg: 'blue', bold: true },
+            fg: 'white', bg: 'black',
+            border: { fg: 'blue' }, label: { fg: 'blue', bold: true },
             selected: { fg: 'black', bg: 'cyan' },
         },
-        items: [
-            'gping          - ping',
-            'gfollow <p>    - follow',
-            'gsfollow       - stop follow',
-            'gcollect <r>   - collect',
-            'gscollect      - stop collect',
-            'gsleep         - sleep',
-            'gkill <target> - attack',
-            'gcraft <item>  - craft',
-            'ginvsee        - inventory',
-            'gdump          - drop all',
-            'gcords         - coords',
-            'gopendoor      - open door',
-            'gsay <msg>     - chat',
-            'ghelp          - all cmds',
-        ],
-        mouse: false,
-        keys: false,
-        scrollable: false,
+        items: COMMANDS.map(c => c.label),
+        mouse: true, keys: false, scrollable: true, vi: false,
+        scrollbar: { ch: '│', style: { bg: 'blue' }, track: { bg: 'black' } },
     });
 
-    // ── Main log box ─────────────────────────────────────────────────────────
-    logBox = blessed.log({
-        parent: screen,
-        top: 3,
-        left: 0,
-        right: 28,
-        bottom: 5,
-        label: ' {bold}Log{/bold} ',
-        tags: true,
-        border: { type: 'line' },
-        style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'cyan' },
-            label: { fg: 'cyan', bold: true },
-            scrollbar: { bg: 'cyan' },
-        },
-        scrollable: true,
-        alwaysScroll: true,
-        scrollbar: { ch: '│', track: { bg: 'black' }, style: { bg: 'cyan' } },
-        padding: { left: 1, right: 0, top: 0, bottom: 0 },
-        mouse: true,
+    (cmdList as any).on('select', (_item: any, index: number) => {
+        const entry = COMMANDS[index];
+        if (!entry) return;
+        inputBuf = entry.cmd;
+        renderInput();
     });
 
-    // ── Input box ────────────────────────────────────────────────────────────
-    inputBox = blessed.textbox({
-        parent: screen,
-        bottom: 0,
-        left: 0,
-        width: '100%-28',
-        height: 3,
-        label: ' {bold}Command{/bold} ',
-        tags: true,
-        border: { type: 'line' },
-        style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'green' },
-            label: { fg: 'green', bold: true },
-            focus: { border: { fg: 'white' } },
-        },
-        inputOnFocus: true,
-        keys: true,
-        mouse: true,
-        padding: { left: 1, right: 1 },
+    // Plain box — we write to it manually, no inputOnFocus, no keys
+    inputBox = blessed.box({
+        parent: screen, bottom: 0, left: 0, right: RIGHT_W, height: INPUT_H,
+        label: ' {bold}{green-fg}Command{/green-fg}{/bold}  Enter=send  ↑↓=history  PgUp/Dn=scroll ',
+        tags: true, border: { type: 'line' },
+        style: { fg: 'white', bg: 'black', border: { fg: 'green' }, label: { fg: 'green', bold: true } },
+        padding: { left: 1, right: 1, top: 0, bottom: 0 },
     });
 
-    // ── Footer ───────────────────────────────────────────────────────────────
-    footerBox = blessed.box({
-        parent: screen,
-        bottom: 0,
-        right: 0,
-        width: 28,
-        height: 3,
-        content: ' {cyan-fg}[F1]{/cyan-fg} Help  {cyan-fg}[ESC]{/cyan-fg} Quit',
-        tags: true,
-        border: { type: 'line' },
-        style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'blue' },
-        },
+    blessed.box({
+        parent: screen, bottom: 0, right: 0, width: RIGHT_W, height: INPUT_H,
+        content: ' {cyan-fg}[F1]{/cyan-fg} Help\n {cyan-fg}[ESC]{/cyan-fg} Quit',
+        tags: true, border: { type: 'line' },
+        style: { fg: 'white', bg: 'black', border: { fg: 'blue' } },
     });
 
-    // ── Help overlay ─────────────────────────────────────────────────────────
     helpBox = blessed.box({
-        parent: screen,
-        top: 'center',
-        left: 'center',
-        width: 60,
-        height: 32,
-        label: ' {bold}Help{/bold} ',
-        tags: true,
+        parent: screen, top: 'center', left: 'center', width: 64, height: 38,
+        label: ' {bold}{yellow-fg} Help — press F1 to close {/yellow-fg}{/bold} ', tags: true,
         border: { type: 'line' },
-        style: {
-            fg: 'white',
-            bg: 'black',
-            border: { fg: 'yellow' },
-            label: { fg: 'yellow', bold: true },
-        },
-        content: buildHelpContent(),
-        hidden: true,
-        padding: { left: 1, right: 1 },
-        scrollable: true,
-        mouse: true,
+        style: { fg: 'white', bg: 'black', border: { fg: 'yellow' }, label: { fg: 'yellow', bold: true } },
+        content: buildHelpContent(), hidden: true,
+        padding: { left: 1, right: 1, top: 0, bottom: 0 },
+        scrollable: true, mouse: true, alwaysScroll: true,
+        scrollbar: { ch: '│', style: { bg: 'yellow' } },
     });
 
-    // Focus input
-    inputBox.focus();
+    renderInput();
 }
 
-function buildHeader(): string {
-    const aiTag = aiEnabled ? '{green-fg}[AI ON]{/green-fg}' : '{red-fg}[AI OFF]{/red-fg}';
-    return ` {bold}{cyan-fg}🤖 GURABOTT{/bold}{/cyan-fg}  ${aiTag}  {white-fg}${serverInfo}{/white-fg}`;
+function renderInput(): void {
+    inputBox?.setContent(inputBuf + '{blink}_{/blink}');
+    screen?.render();
 }
 
-function buildHelpContent(): string {
-    return [
-        '{bold}{cyan-fg}── GURABOTT HELP ─────────────────────────────{/bold}{/cyan-fg}',
-        '',
-        '{bold}Bot Commands (type in input box):{/bold}',
-        '  {cyan-fg}gping{/cyan-fg}              Ping the server',
-        '  {cyan-fg}ghelp{/cyan-fg}              Full help in-game',
-        '  {cyan-fg}gsay <msg>{/cyan-fg}         Chat as bot',
-        '  {cyan-fg}ginv{/cyan-fg}               Item count',
-        '  {cyan-fg}ginvsee{/cyan-fg}            Full inventory',
-        '  {cyan-fg}geat <n> <amt>{/cyan-fg}     Eat food by index',
-        '  {cyan-fg}gjump <n>{/cyan-fg}          Jump n times',
-        '  {cyan-fg}gdrop <n> <amt>{/cyan-fg}    Drop item by index',
-        '  {cyan-fg}gdump{/cyan-fg}              Drop all items',
-        '  {cyan-fg}gwalk{/cyan-fg}              Step forward',
-        '  {cyan-fg}gcr <secs>{/cyan-fg}         Crouch for N seconds',
-        '  {cyan-fg}gcords{/cyan-fg}             Print coordinates',
-        '  {cyan-fg}gtp <x> <y> <z>{/cyan-fg}   Teleport',
-        '  {cyan-fg}gfollow <player>{/cyan-fg}   Follow player',
-        '  {cyan-fg}gsfollow{/cyan-fg}           Stop following',
-        '  {cyan-fg}gcraft <item>{/cyan-fg}      Craft item',
-        '  {cyan-fg}gkill <target>{/cyan-fg}     Attack mob/player',
-        '  {cyan-fg}glast{/cyan-fg}              Last player joined',
-        '  {cyan-fg}gsleep{/cyan-fg}             Sleep in bed',
-        '  {cyan-fg}gopendoor{/cyan-fg}          Open nearest door',
-        '  {cyan-fg}gcollect <r> <n>{/cyan-fg}   Collect resources',
-        '  {cyan-fg}gscollect{/cyan-fg}          Stop collecting',
-        '',
-        '{bold}TUI Keys:{/bold}',
-        '  {cyan-fg}F1{/cyan-fg}       Toggle this help',
-        '  {cyan-fg}ESC{/cyan-fg}      Quit (with confirm)',
-        '  {cyan-fg}↑/↓{/cyan-fg}      Input history',
-        '  {cyan-fg}Enter{/cyan-fg}    Send command',
-        '  {cyan-fg}PgUp/Dn{/cyan-fg}  Scroll log',
-        '',
-        '{bold}Log Colors:{/bold}',
-        '  {white-fg}White{/white-fg}    = Chat',
-        '  {cyan-fg}Cyan{/cyan-fg}     = System',
-        '  {red-fg}Red{/red-fg}      = Error',
-        '  {yellow-fg}Yellow{/yellow-fg}   = State',
-        '  {magenta-fg}Magenta{/magenta-fg}  = AI',
-        '  {green-fg}Green{/green-fg}    = Movement',
-        '',
-        '{cyan-fg}Press F1 to close help{/cyan-fg}',
-    ].join('\n');
-}
+// ── Keypress ──────────────────────────────────────────────────────────────────
 
-// ── Input & Keys ──────────────────────────────────────────────────────────────
-
-function setupInput(): void {
-    if (!inputBox || !screen) return;
-
-    inputBox.key(['enter'], async () => {
-        const raw = (inputBox as any).getValue?.() ?? '';
-        const line = raw.trim();
-        if (!line) return;
-
-        (inputBox as any).clearValue?.();
-        screen!.render();
-        inputBox!.focus();
-
-        // History
-        if (inputHistory[0] !== line) inputHistory.unshift(line);
-        if (inputHistory.length > 100) inputHistory.pop();
-        historyIndex = -1;
-
-        const parts = line.split(/\s+/);
-        const cmd = parts[0].toLowerCase();
-        const args = parts.slice(1);
-
-        addLog('system', `> ${line}`);
-
-        if (commandHandler) {
-            try { await commandHandler(cmd, args); }
-            catch (e: any) { addLog('error', `Command error: ${e?.message ?? e}`); }
-        }
-    });
-
-    inputBox.key(['up'], () => {
-        if (inputHistory.length === 0) return;
-        historyIndex = Math.min(historyIndex + 1, inputHistory.length - 1);
-        const val = inputHistory[historyIndex] ?? '';
-        (inputBox as any).setValue?.(val);
-        screen!.render();
-    });
-
-    inputBox.key(['down'], () => {
-        historyIndex = Math.max(historyIndex - 1, -1);
-        const val = historyIndex === -1 ? '' : (inputHistory[historyIndex] ?? '');
-        (inputBox as any).setValue?.(val);
-        screen!.render();
-    });
-
-    inputBox.key(['pageup'], () => {
-        logBox?.scroll(-10);
-        screen!.render();
-    });
-
-    inputBox.key(['pagedown'], () => {
-        logBox?.scroll(10);
-        screen!.render();
-    });
-}
-
-function setupKeys(): void {
+function setupKeypress(): void {
     if (!screen) return;
 
-    screen.key(['f1'], () => {
-        showHelp = !showHelp;
-        if (showHelp) {
-            helpBox?.show();
-            helpBox?.focus();
-        } else {
-            helpBox?.hide();
-            inputBox?.focus();
-        }
-        screen!.render();
-    });
+    screen.on('keypress', async (ch: string | undefined, key: any) => {
+        const name: string = key?.name ?? '';
 
-    screen.key(['escape', 'q', 'C-c'], () => {
-        if (showHelp) {
-            showHelp = false;
-            helpBox?.hide();
-            inputBox?.focus();
+        // Global hotkeys — always fire first
+        if (name === 'f1') {
+            showHelp = !showHelp;
+            showHelp ? (helpBox?.show(), helpBox?.setFront()) : helpBox?.hide();
             screen!.render();
             return;
         }
-        // Confirm quit
-        const dialog = blessed.question({
-            parent: screen!,
-            top: 'center',
-            left: 'center',
-            width: 40,
-            height: 7,
-            border: { type: 'line' },
-            label: ' Confirm Quit ',
-            tags: true,
-            style: { border: { fg: 'red' }, label: { fg: 'red' } },
-        });
-        dialog.ask('{red-fg}Really quit Gurabott?{/red-fg}', (err, yes) => {
-            if (yes) {
-                destroyTUI();
-                process.exit(0);
-            } else {
-                dialog.destroy();
-                inputBox?.focus();
-                screen!.render();
-            }
-        });
-    });
+        if (name === 'escape' || (key?.ctrl && name === 'c')) {
+            if (showHelp) { showHelp = false; helpBox?.hide(); screen!.render(); return; }
+            showQuitDialog();
+            return;
+        }
+        if (showHelp) return;
 
-    screen.key(['tab'], () => {
-        inputBox?.focus();
+        // Input editing
+        if (name === 'enter' || name === 'return') {
+            const line = inputBuf.trim();
+            inputBuf  = '';
+            historyIdx = -1;
+            renderInput();
+            if (!line) return;
+            if (inputHistory[0] !== line) inputHistory.unshift(line);
+            if (inputHistory.length > 100) inputHistory.pop();
+            addLog('system', `> ${line}`);
+            const [cmd, ...args] = line.split(/\s+/);
+            if (commandHandler) {
+                try { await commandHandler(cmd.toLowerCase(), args); }
+                catch (e: any) { addLog('error', `Error: ${e?.message ?? e}`); }
+            }
+            return;
+        }
+
+        if (name === 'backspace') { inputBuf = inputBuf.slice(0, -1); renderInput(); return; }
+        if (name === 'up')   { historyIdx = Math.min(historyIdx+1, inputHistory.length-1); inputBuf = inputHistory[historyIdx] ?? ''; renderInput(); return; }
+        if (name === 'down') { historyIdx = Math.max(historyIdx-1, -1); inputBuf = historyIdx === -1 ? '' : (inputHistory[historyIdx] ?? ''); renderInput(); return; }
+        if (name === 'pageup')   { logBox?.scroll(-10); screen!.render(); return; }
+        if (name === 'pagedown') { logBox?.scroll(10);  screen!.render(); return; }
+        if (name === 'tab' || name === 'delete') return;
+
+        if (ch && ch.length === 1 && !key?.ctrl && !key?.meta) {
+            inputBuf += ch;
+            renderInput();
+        }
     });
 }
 
-// ── Stats Renderer ────────────────────────────────────────────────────────────
+// ── Quit dialog ───────────────────────────────────────────────────────────────
 
-function renderStats(): void {
-    if (!statsBox || !screen) return;
-
-    const bot = botRef;
-    const state = getState();
-    const sc = stateColor(state);
-
-    if (!bot || !connected) {
-        statsBox.setContent([
-            '{bold}CONNECTION{/bold}',
-            `{red-fg}● Disconnected{/red-fg}`,
-            '',
-            '{bold}STATE{/bold}',
-            `${sc}${state.toUpperCase()}{/${sc.slice(1)}`,
-        ].join('\n'));
-        screen.render();
-        return;
-    }
-
-    const hp = bot.health ?? 0;
-    const food = bot.food ?? 0;
-    const pos = bot.entity?.position;
-    const ping = bot.player?.ping ?? -1;
-    const players = Object.keys(bot.players ?? {}).length;
-    const items = bot.inventory?.items?.()?.length ?? 0;
-    const sc2 = sc.slice(1); // closing tag
-    const hpC = hpColor(hp).slice(1);
-    const foodC = foodColor(food).slice(1);
-
-    const lines = [
-        '{bold}CONNECTION{/bold}',
-        `{green-fg}● Connected  ${ping}ms{/green-fg}`,
-        `Players: {white-fg}${players}{/white-fg}`,
-        '',
-        '{bold}HEALTH{/bold}',
-        `${hpColor(hp)}${hpBar(hp)} ${hp.toFixed(1)}{/${hpC}`,
-        '',
-        '{bold}FOOD{/bold}',
-        `${foodColor(food)}${hpBar(food)} ${food}/20{/${foodC}`,
-        '',
-        '{bold}STATE{/bold}',
-        `${sc}${state.toUpperCase()}{/${sc2}`,
-        '',
-        '{bold}POSITION{/bold}',
-        pos ? `X: {white-fg}${Math.round(pos.x)}{/white-fg}` : 'unknown',
-        pos ? `Y: {white-fg}${Math.round(pos.y)}{/white-fg}` : '',
-        pos ? `Z: {white-fg}${Math.round(pos.z)}{/white-fg}` : '',
-        '',
-        '{bold}INVENTORY{/bold}',
-        `{white-fg}${items}/36 slots{/white-fg}`,
-        '',
-        '{bold}AI{/bold}',
-        aiEnabled ? '{green-fg}Enabled{/green-fg}' : '{red-fg}Disabled{/red-fg}',
-        '',
-        '{bold}UPTIME{/bold}',
-        formatUptime(process.uptime()),
-    ];
-
-    statsBox.setContent(lines.join('\n'));
+function showQuitDialog(): void {
+    if (!screen) return;
+    const overlay = blessed.box({
+        parent: screen, top: 'center', left: 'center', width: 38, height: 9,
+        border: { type: 'line' }, tags: true,
+        style: { bg: 'black', border: { fg: 'red' } },
+        content: '\n  {red-fg}{bold}Really quit Gurabott?{/bold}{/red-fg}\n',
+    });
+    const yes = blessed.button({
+        parent: overlay, bottom: 1, left: 3, width: 12, height: 1,
+        content: '{center}[ Yes ]{/center}', tags: true, mouse: true, keys: true,
+        style: { fg: 'white', bg: 'red', hover: { bg: 'white', fg: 'black' }, focus: { bg: 'white', fg: 'black' } },
+    });
+    const no = blessed.button({
+        parent: overlay, bottom: 1, right: 3, width: 12, height: 1,
+        content: '{center}[  No ]{/center}', tags: true, mouse: true, keys: true,
+        style: { fg: 'white', bg: 'blue', hover: { bg: 'white', fg: 'black' }, focus: { bg: 'white', fg: 'black' } },
+    });
+    const close = () => { overlay.destroy(); screen!.render(); };
+    yes.on('press', () => { destroyTUI(); process.exit(0); });
+    no.on('press', close);
+    yes.focus();
     screen.render();
 }
 
-function formatUptime(secs: number): string {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = Math.floor(secs % 60);
-    if (h > 0) return `{white-fg}${h}h ${m}m ${s}s{/white-fg}`;
-    if (m > 0) return `{white-fg}${m}m ${s}s{/white-fg}`;
-    return `{white-fg}${s}s{/white-fg}`;
+// ── Stats ─────────────────────────────────────────────────────────────────────
+
+function renderStats(): void {
+    if (!statsBox || !screen) return;
+    const s  = getState();
+    const sc = STATE_COLORS[s] ?? '{white-fg}';
+    const bot = botRef;
+
+    if (!bot || !connected) {
+        statsBox.setContent(`{bold}CONNECTION{/bold}\n{red-fg}● Disconnected{/red-fg}\n\n{bold}STATE{/bold}\n${sc}${s.toUpperCase()}${end(sc)}`);
+        screen.render(); return;
+    }
+
+    const hp   = bot.health ?? 0;
+    const food = bot.food ?? 0;
+    const pos  = bot.entity?.position;
+    const ping = bot.player?.ping ?? -1;
+    const pls  = Object.keys(bot.players ?? {}).length;
+    const inv  = bot.inventory?.items?.()?.length ?? 0;
+    const hC   = hpColor(hp), fC = foodColor(food);
+
+    statsBox.setContent([
+        '{bold}CONNECTION{/bold}',
+        `{green-fg}● Connected  ${ping}ms{/green-fg}`,
+        `Players: {white-fg}${pls}{/white-fg}`,
+        '', '{bold}HEALTH{/bold}',
+        `${hC}${hpBar(hp)} ${hp.toFixed(1)}${end(hC)}`,
+        '', '{bold}FOOD{/bold}',
+        `${fC}${hpBar(food)} ${food}/20${end(fC)}`,
+        '', '{bold}STATE{/bold}',
+        `${sc}${s.toUpperCase()}${end(sc)}`,
+        '', '{bold}POS{/bold}',
+        pos ? `X {white-fg}${Math.round(pos.x)}{/white-fg}` : 'unknown',
+        pos ? `Y {white-fg}${Math.round(pos.y)}{/white-fg}` : '',
+        pos ? `Z {white-fg}${Math.round(pos.z)}{/white-fg}` : '',
+        '', '{bold}INV{/bold}',
+        `{white-fg}${inv}/36{/white-fg}`,
+        '', '{bold}AI{/bold}',
+        aiEnabled ? '{green-fg}On{/green-fg}' : '{red-fg}Off{/red-fg}',
+        '', '{bold}UPTIME{/bold}',
+        `{white-fg}${uptime(process.uptime())}{/white-fg}`,
+    ].join('\n'));
+    screen.render();
 }
 
 // ── Log API ───────────────────────────────────────────────────────────────────
 
 export function addLog(type: TUILog['type'], text: string): void {
-    const entry: TUILog = { type, text, ts: Date.now() };
-    logs.push(entry);
-    if (logs.length > MAX_LOGS) logs.shift();
-
-    if (!logBox || !screen) {
-        // Fallback to console if TUI not ready
-        console.log(`[${type.toUpperCase()}] ${text}`);
-        return;
-    }
-
-    const ts = new Date(entry.ts).toLocaleTimeString('en-US', { hour12: false });
-    const color = typeColor(type);
-    const endTag = color.replace('{', '{/').replace('-fg}', '-fg}');
-    const badge = typeBadge(type);
-    const line = `{gray-fg}${ts}{/gray-fg} ${badge} ${color}${text}{/${endTag.slice(2)}`;
-
-    logBox.log(line);
+    if (isSuppressed(text)) return;
+    if (!logBox || !screen) { process.stdout.write(`[${type.toUpperCase()}] ${text}\n`); return; }
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const c  = COLORS[type];
+    logBox.log(`{gray-fg}${ts}{/gray-fg} ${BADGES[type]} ${c}${text}${end(c)}`);
     screen.render();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function attachBotToTUI(bot: Bot): void {
-    botRef = bot;
+    botRef    = bot;
     connected = true;
-
-    bot.on('end', () => {
-        connected = false;
-        addLog('system', 'Disconnected from server');
-        renderStats();
-    });
-
-    bot.on('login', () => {
-        connected = true;
-        addLog('system', `Logged in as ${bot.username}`);
-        renderStats();
-    });
-
-    bot.on('chat', (username: string, message: string) => {
-        if (username === bot.username) return;
-        addLog('chat', `<${username}> ${message}`);
-    });
-
-    bot.on('error', (err: Error) => {
-        addLog('error', `Bot error: ${err.message}`);
-    });
-
-    bot.on('kicked', (reason: string) => {
-        connected = false;
-        addLog('error', `Kicked: ${reason}`);
-        renderStats();
-    });
+    bot.on('end',    ()             => { connected = false; addLog('system', 'Disconnected'); renderStats(); });
+    bot.on('login',  ()             => { connected = true;  addLog('system', `Logged in as ${bot.username}`); renderStats(); });
+    bot.on('chat',   (u: string, m: string) => { if (u !== bot.username) addLog('chat', `<${u}> ${m}`); });
+    bot.on('error',  (e: Error)     => addLog('error', `Bot error: ${e.message}`));
+    bot.on('kicked', (r: string)    => { connected = false; addLog('error', `Kicked: ${r}`); renderStats(); });
 }
 
-export function setConnected(val: boolean): void {
-    connected = val;
-    renderStats();
-}
+export function setConnected(val: boolean): void { connected = val; renderStats(); }
 
 export function updateAIStatus(enabled: boolean): void {
     aiEnabled = enabled;
-    if (headerBox) {
-        headerBox.setContent(buildHeader());
-        screen?.render();
-    }
+    headerBox?.setContent(buildHeader());
+    screen?.render();
 }
 
 export function destroyTUI(): void {
-    if (statsUpdateInterval) clearInterval(statsUpdateInterval);
     try { screen?.destroy(); } catch {}
     screen = null;
 }
 
-/**
- * Intercept console.log/warn/error so they route through TUI
- */
 export function interceptConsole(): void {
-    const orig = {
-        log:   console.log.bind(console),
-        warn:  console.warn.bind(console),
-        error: console.error.bind(console),
-    };
+    const fmt = (a: any[]) => a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+    console.log   = (...a) => addLog('system', fmt(a));
+    console.warn  = (...a) => addLog('warn',   fmt(a));
+    console.error = (...a) => addLog('error',  fmt(a));
+}
 
-    console.log = (...args: any[]) => {
-        const msg = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-        addLog('system', msg);
-    };
-    console.warn = (...args: any[]) => {
-        const msg = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-        addLog('warn', msg);
-    };
-    console.error = (...args: any[]) => {
-        const msg = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-        addLog('error', msg);
-    };
-
-    // Keep originals accessible
-    (globalThis as any).__origConsole = orig;
+function buildHelpContent(): string {
+    return [
+        '{bold}{cyan-fg}── GURABOTT COMMANDS ──────────────────{/bold}{/cyan-fg}',
+        '',
+        ' {cyan-fg}gping{/cyan-fg}             Ping',
+        ' {cyan-fg}gsay <msg>{/cyan-fg}        Chat',
+        ' {cyan-fg}ginvsee{/cyan-fg}           Inventory',
+        ' {cyan-fg}gdump{/cyan-fg}             Drop all',
+        ' {cyan-fg}gcords{/cyan-fg}            Coordinates',
+        ' {cyan-fg}gtp <x> <y> <z>{/cyan-fg}  Teleport',
+        ' {cyan-fg}gfollow <p>{/cyan-fg}       Follow player',
+        ' {cyan-fg}gsfollow{/cyan-fg}          Stop following',
+        ' {cyan-fg}gcraft <item>{/cyan-fg}     Craft item',
+        ' {cyan-fg}gkill <target>{/cyan-fg}    Attack mob/player',
+        ' {cyan-fg}gsleep{/cyan-fg}            Sleep in bed',
+        ' {cyan-fg}gopendoor{/cyan-fg}         Open door',
+        ' {cyan-fg}gcollect <r>{/cyan-fg}      Collect resources',
+        ' {cyan-fg}gscollect{/cyan-fg}         Stop collecting',
+        ' {cyan-fg}gjump <n>{/cyan-fg}         Jump n times',
+        ' {cyan-fg}gcr <secs>{/cyan-fg}        Crouch N secs',
+        ' {cyan-fg}geat <n> <amt>{/cyan-fg}    Eat by index',
+        ' {cyan-fg}gdrop <n> <amt>{/cyan-fg}   Drop by index',
+        ' {cyan-fg}glast{/cyan-fg}             Last joined player',
+        ' {cyan-fg}ghelp{/cyan-fg}             In-game help',
+        '',
+        ' {yellow-fg}gsurv{/yellow-fg}            Start survival loop',
+        ' {yellow-fg}gsurv stop{/yellow-fg}       Stop survival loop',
+        '  Phases: wood→tools→stone→iron→diamond',
+        '',
+        '{bold}Keys:{/bold}',
+        '  F1        Toggle help',
+        '  ESC       Quit dialog',
+        '  ↑ / ↓     Input history',
+        '  PgUp/Dn   Scroll log',
+        '  Enter     Send command',
+        '',
+        '{bold}Commands panel:{/bold}',
+        '  Click any item → fills input.',
+        '  Scroll list with mouse wheel.',
+    ].join('\n');
 }

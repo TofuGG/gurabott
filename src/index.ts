@@ -2,19 +2,12 @@
  * index.ts - Gurabott entry point
  */
 
-import { loadConfig } from './config.js';
-import initWeb from './web.js';
+import { loadConfig } from './config.ts';
+import initWeb from './web.ts';
 import readline from 'readline';
-import { initTUI, addLog, interceptConsole, destroyTUI } from './modules/tui.js';
-import { handleCommand } from './modules/commands.js';
-import { attachBot as attachBotToState } from './modules/state.js';
-import { AI_ENABLED, createBot, getBotCommandCtx } from './bot.js';
-
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-});
+import { initTUI, addLog, interceptConsole, destroyTUI } from './modules/tui.ts';
+import { handleCommand } from './modules/commands.ts';
+import { AI_ENABLED, createBot, getBotCommandCtx } from './bot.ts';
 
 async function main() {
     let mineflayerViewer: any = null;
@@ -23,12 +16,23 @@ async function main() {
         mineflayerViewer = viewer.default?.mineflayer || (viewer as any).mineflayer || viewer.default;
     } catch {}
 
+    // Use readline ONLY for the config prompts before the TUI starts.
+    // We MUST close it before initTUI so blessed gets exclusive stdin ownership.
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: true,
+    });
+
     const config = await loadConfig(rl);
+
+    // Hand stdin back — blessed will take it from here.
+    rl.close();
+
     const serverInfo = `${config.client.host}:${config.client.port}  ·  ${config.client.username}`;
 
     initTUI({
         onCommand: async (cmd: string, args: string[]) => {
-            // TUI-internal commands
             if (cmd === 'quit' || cmd === 'exit') {
                 addLog('system', 'Shutting down...');
                 destroyTUI();
@@ -39,7 +43,6 @@ async function main() {
                 return;
             }
 
-            // Route g-prefixed commands through bot command system
             const ctx = getBotCommandCtx();
             if (!ctx) { addLog('warn', 'Bot not connected yet'); return; }
             const fullCmd = [cmd, ...args].join(' ');
@@ -59,9 +62,9 @@ async function main() {
 
     initWeb();
 
+    // createBot no longer receives rl — TUI owns input now.
     createBot(
         { ip: config.client.host, port: parseInt(config.client.port, 10), username: config.client.username },
-        rl,
         mineflayerViewer,
     );
 

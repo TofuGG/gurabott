@@ -47,7 +47,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
         // If stuck more than 4 times in 30s, just wait it out — pathfinding isn't helping
         if (recentStucks > 4) {
-            console.log(`[STUCK] Firing too frequently (${recentStucks}x) — pausing movement for 10s`);
+            // console.log(`[STUCK] Firing too frequently (${recentStucks}x) — pausing movement for 10s`);
             escaping = true;
             setEscaping?.(true);
             await sleep(10000);
@@ -59,7 +59,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
         escaping = true;
         setEscaping?.(true);
-        console.log('[STUCK] Detected stuck at', stuckPos.toString(), '— escaping');
+        // console.log('[STUCK] Detected stuck at', stuckPos.toString(), '— escaping');
 
         try {
             bot.setControlState('jump', true);
@@ -90,13 +90,13 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
                         await bot.pathfinder.goto(new goals.GoalBlock(safeSpot.x, safeSpot.y, safeSpot.z));
                     }
                 } catch (err) {
-                    console.warn('[STUCK] Could not pathfind to safety:', (err as any).message);
+                    // console.warn('[STUCK] Could not pathfind to safety:', (err as any).message);
                 }
             }
 
             escaping = false;
             setEscaping?.(false);
-            console.log('[STUCK] Escape complete');
+            // console.log('[STUCK] Escape complete');
         }
     }
 

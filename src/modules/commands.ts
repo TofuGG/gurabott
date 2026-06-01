@@ -6,9 +6,10 @@
 import type { Bot } from 'mineflayer';
 import pathfinderLib from 'mineflayer-pathfinder';
 import minecraftData from 'minecraft-data';
-import { sleep } from '../utils.js';
-import { addLog } from './tui.js';
-import { BotState, getState, setState, clearAllControls } from './state.js';
+import { sleep } from '../utils.ts';
+import { addLog } from './tui.ts';
+import { BotState, getState, setState, clearAllControls } from './state.ts';
+import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
 
 const { goals } = pathfinderLib;
 const { GoalBlock, GoalGetToBlock, GoalFollow } = goals;
@@ -537,6 +538,22 @@ const commands: Record<string, CommandFn> = {
             collected: summary || 'nothing',
         }));
         collecting.summary = {};
+    },
+    async gsurv({ bot, getSafeMovements }, _username, args) {
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'stop') {
+            stopSurv();
+            bot.chat('Survival mode stopping...');
+        } else {
+            // accepts: gsurv  OR  gsurv start
+            if (isSurvRunning()) {
+                addLog('warn', '[SURV] Already running — use "gsurv stop" to stop');
+                bot.chat('Survival already active! Use "gsurv stop" to stop.');
+            } else {
+                bot.chat('▶ Starting survival mode...');
+                startSurv(bot, getSafeMovements);
+            }
+        }
     },
 };
 

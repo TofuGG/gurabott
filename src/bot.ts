@@ -7,20 +7,19 @@ import Mineflayer from 'mineflayer';
 import pathfinderLib from 'mineflayer-pathfinder';
 import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
-import * as readline from 'readline';
 import Groq from 'groq-sdk';
 
-import { sleep, getRandom } from './utils.js';
+import { sleep, getRandom } from './utils.ts';
 import CONFIG from '../config.json' with { type: 'json' };
 import PERSONALITY from '../personality.json' with { type: 'json' };
 
-import { BotState, attachBot, getState, setState, clearAllControls } from './modules/state.js';
-import { addLog, attachBotToTUI, setConnected } from './modules/tui.js';
-import { getAIResponse, clearHistory, type AIContext } from './modules/ai.js';
-import { handleCommand, type CommandContext } from './modules/commands.js';
-import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.js';
-import { startStuckDetector } from './stuckDetector.js';
-import { startMovementAI } from './movementAI.js';
+import { BotState, attachBot, getState, setState, clearAllControls } from './modules/state.ts';
+import { addLog, attachBotToTUI, setConnected } from './modules/tui.ts';
+import { getAIResponse, clearHistory, type AIContext } from './modules/ai.ts';
+import { handleCommand, type CommandContext } from './modules/commands.ts';
+import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
+import { startStuckDetector } from './stuckDetector.ts';
+import { startMovementAI } from './movementAI.ts';
 
 const { pathfinder, Movements } = pathfinderLib;
 const { goals } = pathfinderLib;
@@ -47,9 +46,7 @@ const aiCtx: AIContext | null = AI_ENABLED && groq ? {
 let bot: Mineflayer.Bot;
 let lastPlayerJoined: string | null = null;
 let currentConfig: { ip: string; port: number; username: string } | null = null;
-let rlInstance: readline.Interface | null = null;
 const intervals: NodeJS.Timeout[] = [];
-let lastFleeTime = 0;
 let isEscapingStuck = false;
 let lastChimeTime = 0;
 let lastHurtMessageTime = 0;
@@ -183,18 +180,16 @@ const disconnect = (): void => {
 
 export function createBot(
     config: { ip: string; port: number; username: string },
-    rl: readline.Interface,
     mineflayerViewer?: any,
 ): void {
     currentConfig = config;
-    rlInstance = rl;
 
     initReconnect({
         maxAttempts: 5,
         delayMs: CONFIG.action.retryDelay,
         onReconnect: () => {
             disconnect();
-            if (currentConfig && rlInstance) createBot(currentConfig, rlInstance, mineflayerViewer);
+            if (currentConfig) createBot(currentConfig, mineflayerViewer);
         },
         onGiveUp: () => {
             addLog('error', 'Reconnect failed. Please restart the bot.');
@@ -211,15 +206,7 @@ export function createBot(
     bot.loadPlugin(pathfinder);
     attachBot(bot);
     attachBotToTUI(bot);
-
-    // Wire readline to gsay
-    rl.removeAllListeners('line');
-    rl.on('line', (line) => {
-        const [cmd, ...args] = line.trim().split(/\s+/);
-        if (cmd === 'gsay') {
-            try { bot.chat(args.join(' ')); } catch {}
-        }
-    });
+    // Input is now handled exclusively by the TUI (blessed). No readline here.
 
     // ── Events ──────────────────────────────────────────────────────────────
 
@@ -274,11 +261,15 @@ export function createBot(
         const ctx = buildCommandCtx();
         const handled = await handleCommand(ctx, username, message).catch(() => false);
 
+        // If it was a command (g-prefixed or handled), never pass to AI
+        const trimmed = message.trim();
+        if (handled || trimmed.toLowerCase().startsWith('g')) return;
+
         const botName = bot.username.toLowerCase();
         const msgLower = message.toLowerCase();
         const state = getState();
 
-        // Solo mode: bot is alone with one player
+        // Solo mode: bot is alone with one player — respond conversationally
         if (getOtherPlayerCount() === 1 && !msgLower.includes(botName)) {
             if (state === BotState.IDLE || state === BotState.FOLLOWING) {
                 await handleAIResponse(username, message, 'solo');
@@ -416,52 +407,172 @@ export function createBot(
         }
     });
 
-    // ── Flee behavior ────────────────────────────────────────────────────────
+    // ── Combat / flee behavior ────────────────────────────────────────────────
+    // Fight if ≤3 hostile mobs nearby; flee if overwhelmed or low HP.
 
-    bot.on('entityMoved', (entity) => {
-        if (!bot?.entity) return;
-        if (!entity || entity.type !== 'mob' || !entity.position) return;
+    let combatActive    = false;
+    let combatInterval: NodeJS.Timeout | null = null;
+
+    function isHostileEntity(e: any): boolean {
+        if (!e?.position || !e.name) return false;
+        // mineflayer reports baby zombies and chicken jockeys as type 'mob' with name 'zombie'
+        // Some versions report jockey riders with type 'mob' or no type — check both
+        const name = e.name.toLowerCase();
+        const validType = e.type === 'mob' || e.type === 'hostile' || !e.type;
+        return validType && HOSTILE_MOBS.has(name);
+    }
+
+    function countNearbyHostiles(): number {
+        return Object.values(bot.entities as Record<string, any>).filter(e =>
+            isHostileEntity(e) &&
+            e.position?.distanceTo(bot.entity.position) < 10
+        ).length;
+    }
+
+    function getNearestHostile(): any {
+        let nearest: any = null;
+        let minDist = Infinity;
+        for (const e of Object.values(bot.entities as Record<string, any>)) {
+            if (!isHostileEntity(e)) continue;
+            const d = e.position?.distanceTo(bot.entity.position) ?? Infinity;
+            if (d < minDist) { minDist = d; nearest = e; }
+        }
+        return nearest;
+    }
+
+    function stopCombat() {
+        if (combatInterval) { clearInterval(combatInterval); combatInterval = null; }
+        combatActive = false;
+        if (getState() === BotState.ATTACKING || getState() === BotState.FLEEING) {
+            setState(BotState.IDLE);
+        }
+    }
+
+    function startCombat(target: any) {
+        if (combatActive) return;
+        combatActive = true;
+        setState(BotState.ATTACKING);
+        addLog('system', `⚔ Fighting ${target.name}`);
+
+        // Equip best weapon
+        const weaponPriority = [
+            'netherite_sword','diamond_sword','iron_sword','stone_sword','golden_sword','wooden_sword',
+            'netherite_axe',  'diamond_axe',  'iron_axe',  'stone_axe',  'golden_axe',  'wooden_axe',
+        ];
+        for (const w of weaponPriority) {
+            const item = bot.inventory.items().find(i => i.name === w);
+            if (item) { bot.equip(item, 'hand').catch(() => {}); break; }
+        }
+
+        bot.pathfinder.setMovements(getSafeMovements());
+        bot.pathfinder.setGoal(new goals.GoalFollow(target, 1), true);
+
+        combatInterval = setInterval(() => {
+            const hp = bot.health ?? 20;
+
+            // Flee if HP critical or mob count overwhelming
+            if (hp <= 5 || countNearbyHostiles() > 5) {
+                stopCombat();
+                doFlee(target);
+                return;
+            }
+
+            // Target dead or gone
+            const still = bot.entities[target.id];
+            if (!still || still.position?.distanceTo(bot.entity.position) > 20) {
+                // Check for other nearby mobs to chain-fight
+                const next = getNearestHostile();
+                if (next && next.position?.distanceTo(bot.entity.position) < 10) {
+                    stopCombat();
+                    startCombat(next);
+                } else {
+                    stopCombat();
+                }
+                return;
+            }
+
+            // Attack if in range
+            if (still.position?.distanceTo(bot.entity.position) < 4) {
+                try { bot.attack(still); } catch {}
+            }
+        }, 500);
+
+        intervals.push(combatInterval as any);
+    }
+
+    function doFlee(threat: any) {
         if (getState() === BotState.FLEEING) return;
+        setState(BotState.FLEEING);
+        addLog('system', `🏃 Fleeing from ${threat.name}`);
+
+        const mv = getSafeMovements();
+        mv.allowSprinting = true;
+        bot.pathfinder.setMovements(mv);
+
+        let fleeTimer: NodeJS.Timeout | null = null;
+
+        // Keep recalculating flee destination every 800ms so bot never stops
+        function updateFleeGoal() {
+            if (getState() !== BotState.FLEEING || !bot?.entity) return;
+            const botPos    = bot.entity.position;
+            const threatPos = threat.position ?? botPos;
+            const dx  = botPos.x - threatPos.x;
+            const dz  = botPos.z - threatPos.z;
+            const len = Math.sqrt(dx*dx + dz*dz) || 1;
+            const runX = botPos.x + (dx/len) * 16;
+            const runZ = botPos.z + (dz/len) * 16;
+            try {
+                bot.pathfinder.setGoal(new goals.GoalBlock(Math.round(runX), Math.round(botPos.y), Math.round(runZ)));
+            } catch {}
+        }
+
+        updateFleeGoal();
+        const fleeInterval = setInterval(updateFleeGoal, 800);
+        intervals.push(fleeInterval as any);
+
+        // Stop fleeing after 6s or when threat is gone
+        fleeTimer = setTimeout(() => {
+            clearInterval(fleeInterval);
+            if (getState() === BotState.FLEEING) {
+                bot.pathfinder.setGoal(null);
+                setState(BotState.IDLE);
+            }
+        }, 6000);
+    }
+
+    // Trigger combat/flee whenever a mob moves into range
+    bot.on('entityMoved', (entity: any) => {
+        if (!bot?.entity) return;
+        if (!isHostileEntity(entity)) return;
+        if (combatActive) return;
+        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING) return;
         if ((bot.health ?? 20) <= 0) return;
 
-        const now = Date.now();
-        if (now - lastFleeTime < 3000) return;
+        const dist = bot.entity.position.distanceTo(entity.position);
+        if (dist >= 8) return;
 
-        const mobName = entity.name?.toLowerCase();
-        if (!mobName || !HOSTILE_MOBS.has(mobName)) return;
-
-        const distance = bot.entity.position.distanceTo(entity.position);
-        if (distance >= 6) return;
-
-        lastFleeTime = now;
-        setState(BotState.FLEEING);
-
-        const botPos = bot.entity.position;
-        const dx = botPos.x - entity.position.x;
-        const dz = botPos.z - entity.position.z;
-        const length = Math.sqrt(dx * dx + dz * dz) || 1;
-        const runX = botPos.x + (dx / length) * 8;
-        const runZ = botPos.z + (dz / length) * 8;
-        let runY = botPos.y;
-
-        for (let y = Math.floor(botPos.y); y > 0; y--) {
-            const block = bot.blockAt(new Vec3(runX, y, runZ));
-            if (block && block.boundingBox === 'block') { runY = y + 1; break; }
+        const mobCount = countNearbyHostiles();
+        if (mobCount <= 3) {
+            startCombat(entity);
+        } else if (mobCount > 3) {
+            doFlee(entity);
         }
-
-        try {
-            const msg = ((PERSONALITY as any).messages?.mobThreat ?? '{mob}!').replace('{mob}', mobName);
-            bot.chat(msg);
-            bot.pathfinder.setMovements(getSafeMovements());
-            bot.pathfinder.setGoal(new goals.GoalBlock(Math.round(runX), Math.round(runY), Math.round(runZ)));
-        } catch (e: any) {
-            addLog('error', `Flee error: ${e?.message}`);
-        }
-
-        setTimeout(() => {
-            if (getState() === BotState.FLEEING) setState(BotState.IDLE);
-        }, 5000);
     });
+
+    // Also scan for mobs every 2s even if they haven't moved (handles spawns)
+    const hostileScanInterval = setInterval(() => {
+        if (!bot?.entity || combatActive) return;
+        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING) return;
+        const nearest = getNearestHostile();
+        if (!nearest) return;
+        const dist = nearest.position?.distanceTo(bot.entity.position) ?? Infinity;
+        if (dist < 8) {
+            const mobCount = countNearbyHostiles();
+            if (mobCount <= 3) startCombat(nearest);
+            else doFlee(nearest);
+        }
+    }, 2000);
+    intervals.push(hostileScanInterval as any);
 }
 
 /** Returns the current command context (or null if bot not yet created) */
