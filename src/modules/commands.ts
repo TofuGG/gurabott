@@ -56,7 +56,7 @@ function formatMsg(template: string, vars: Record<string, string>): string {
 
 // ── Command registry ──────────────────────────────────────────────────────────
 
-type CommandFn = (ctx: CommandContext, username: string, args: string[]) => Promise<void>;
+type CommandFn = (ctx: CommandContext, username: string, args: string[], ctxAgain?: CommandContext) => Promise<void>;
 
 const commands: Record<string, CommandFn> = {
 

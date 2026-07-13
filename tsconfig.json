@@ -3,6 +3,7 @@
 		"strict": true,
 		"module": "NodeNext",
 		"target": "ES2020",
+		"lib": ["ES2021"],
 		"moduleResolution": "NodeNext",
 		"noEmit": true,
 		"resolveJsonModule": true,

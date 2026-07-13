@@ -18,6 +18,7 @@ import { addLog, attachBotToTUI, setConnected } from './modules/tui.ts';
 import { getAIResponse, clearHistory, type AIContext } from './modules/ai.ts';
 import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
+import { initAuth } from './modules/auth.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI } from './movementAI.ts';
 
@@ -208,6 +209,15 @@ export function createBot(
     attachBotToTUI(bot);
     // Input is now handled exclusively by the TUI (blessed). No readline here.
 
+    const authConfig = (CONFIG as any).auth ?? {
+        enabled: false,
+        password: '',
+        mode: 'command',
+        debugWindows: false,
+        gui: { titleMatch: ['login', 'register', 'authme'], slotMap: {}, clickDelayMs: 500 },
+    };
+    initAuth(bot, authConfig);
+
     // ── Events ──────────────────────────────────────────────────────────────
 
     bot.on('error', (err) => {
@@ -393,7 +403,7 @@ export function createBot(
         lastPlayerJoined = player.username;
         addLog('system', `${player.username} joined the server`);
 
-        const templates = (PERSONALITY as any).messages?.playerJoined ?? [];
+        const templates: string[] = (PERSONALITY as any).messages?.playerJoined ?? [];
         if (templates.length > 0) {
             const msg = getRandom(templates).replace('{player}', player.username);
             setTimeout(() => { try { bot.chat(msg); } catch {} }, 1000);

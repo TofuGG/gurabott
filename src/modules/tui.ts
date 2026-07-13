@@ -53,13 +53,13 @@ function isSuppressed(text: string) { return SUPPRESSED.some(p => text.includes(
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
-let screen:   blessed.Widgets.Screen | null = null;
-let logBox:   blessed.Widgets.Log    | null = null;
-let statsBox: blessed.Widgets.Box    | null = null;
-let inputBox: blessed.Widgets.Box    | null = null;
-let cmdList:  blessed.Widgets.List   | null = null;
-let headerBox:blessed.Widgets.Box    | null = null;
-let helpBox:  blessed.Widgets.Box    | null = null;
+let screen:   blessed.Widgets.Screen      | null = null;
+let logBox:   blessed.Widgets.Log         | null = null;
+let statsBox: blessed.Widgets.BoxElement  | null = null;
+let inputBox: blessed.Widgets.BoxElement  | null = null;
+let cmdList:  blessed.Widgets.ListElement | null = null;
+let headerBox:blessed.Widgets.BoxElement  | null = null;
+let helpBox:  blessed.Widgets.BoxElement  | null = null;
 
 let botRef:         Bot | null         = null;
 let commandHandler: CommandHandler | null = null;

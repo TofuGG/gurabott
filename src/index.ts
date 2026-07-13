@@ -7,7 +7,6 @@ import initWeb from './web.ts';
 import readline from 'readline';
 import { initTUI, addLog, interceptConsole, destroyTUI } from './modules/tui.ts';
 import { handleCommand } from './modules/commands.ts';
-import { AI_ENABLED, createBot, getBotCommandCtx } from './bot.ts';
 
 async function main() {
     let mineflayerViewer: any = null;
@@ -28,6 +27,27 @@ async function main() {
 
     // Hand stdin back — blessed will take it from here.
     rl.close();
+
+    // BUG FIX: node's readline (used above for the config prompts) installs
+    // its own raw-byte -> 'keypress' decoder on process.stdin. rl.close()
+    // does NOT remove that decoder — it only stops readline from reacting to
+    // 'keypress' events, it leaves the underlying 'data' listener attached.
+    // blessed installs its own, separate 'data' -> 'keypress' decoder when
+    // the TUI starts (its guard flag has a different name, so it doesn't
+    // know readline's decoder is already there). With both decoders alive,
+    // every physical keystroke gets decoded twice, so typing "hello" was
+    // rendered as "hheelllloo". Stripping readline's listeners here gives
+    // blessed a clean stdin to attach to.
+    process.stdin.removeAllListeners('keypress');
+    process.stdin.removeAllListeners('data');
+
+    // bot.ts does `import CONFIG from '../config.json'` at its top level,
+    // which Node resolves the moment the module loads. Loading it dynamically
+    // here — after loadConfig() has guaranteed config.json exists on disk —
+    // instead of statically at the top of this file means a first-time run
+    // on a fresh clone (no config.json yet) reaches the interactive setup
+    // instead of crashing with ERR_MODULE_NOT_FOUND before it ever starts.
+    const { AI_ENABLED, createBot, getBotCommandCtx } = await import('./bot.ts');
 
     const serverInfo = `${config.client.host}:${config.client.port}  ·  ${config.client.username}`;
 

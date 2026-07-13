@@ -121,7 +121,7 @@ async function mine(bot: Bot, blockNames: string[], needed: number, getSafeMovem
             logWarn(`  No ${blockNames[0]} found within ${searchRadius} blocks`);
             break;
         }
-        log(`  ⛏ Found ${block.name} at ${block.position.toFloor()}, going there...`);
+        log(`  ⛏ Found ${block.name} at ${block.position.floored()}, going there...`);
         const reached = await goTo(bot, block, getSafeMovements);
         if (!reached) { await sleep(500); continue; }
         try {
@@ -211,7 +211,7 @@ async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: 
     }
     if (!furnaceBlock) { logWarn('  Furnace not found'); return false; }
 
-    log(`  Going to furnace at ${furnaceBlock.position.toFloor()}...`);
+    log(`  Going to furnace at ${furnaceBlock.position.floored()}...`);
     await goTo(bot, furnaceBlock, getSafeMovements);
 
     try {
