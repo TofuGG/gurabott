@@ -36,9 +36,12 @@ export function setState(newState: BotState): void {
     for (const fn of _listeners) {
         try { fn(prev, newState); } catch {}
     }
-    // Cancel pathfinding & controls on most transitions
-    if (_botRef) {
-        try { (_botRef as any).pathfinder?.setGoal(null); } catch {}
+    // Only cancel pathfinding & controls when returning to idle —
+    // aggressive clearing on every transition caused race conditions
+    // (e.g. FOLLOWING→ATTACKING would kill the follow goal before
+    // attack could set its own).
+    if (_botRef && newState === BotState.IDLE) {
+        try { (_botRef as any).ashfinder?.stop(); } catch {}
         clearAllControls(_botRef);
     }
 }

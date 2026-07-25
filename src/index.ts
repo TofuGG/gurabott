@@ -94,6 +94,12 @@ async function main() {
         process.exit(0);
     });
 
+    process.on('SIGTERM', () => {
+        addLog('system', 'SIGTERM received, shutting down...');
+        destroyTUI();
+        process.exit(0);
+    });
+
     process.on('unhandledRejection', (reason: any) => {
         addLog('error', `Unhandled rejection: ${reason?.message ?? reason}`);
     });

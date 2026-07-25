@@ -14,7 +14,7 @@
     "minecraft-data": "^3.110.0",
     "minecraft-protocol": "^1.66.1",
     "mineflayer": "github:PrismarineJS/mineflayer",
-    "mineflayer-pathfinder": "^2.4.5",
+    "@miner-org/mineflayer-baritone": "^4.5.1",
     "prismarine-viewer": "^1.33.0",
     "tsx": "^4.21.0"
   },

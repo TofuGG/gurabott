@@ -1,14 +1,25 @@
 {
   "client": {
     "host": "SERVER_ADDRESS",
-    "port": "IP_ADDRESS",
+    "port": "PORT",
     "username": "USERNAME"
-   },
-"ai": {
+  },
+  "ai": {
     "enabled": false,
     "apiKey": "YOUR_GROQ_API",
     "maxTokens": 150
-   },
+  },
+  "auth": {
+    "enabled": false,
+    "password": "",
+    "mode": "command",
+    "debugWindows": false,
+    "gui": {
+      "titleMatch": ["login", "register", "authme"],
+      "slotMap": {},
+      "clickDelayMs": 500
+    }
+  },
   "logLevel": [
     "error",
     "log",

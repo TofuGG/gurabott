@@ -16,29 +16,33 @@
 
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
-import pathfinderLib from 'mineflayer-pathfinder';
+import baritonePlugin from '@miner-org/mineflayer-baritone';
 import minecraftData from 'minecraft-data';
 import { addLog } from './tui.ts';
 import { BotState, getState, setState } from './state.ts';
 import { sleep } from '../utils.ts';
 
-const { goals } = pathfinderLib;
-const { GoalBlock, GoalGetToBlock } = goals;
+const baritoneGoals = baritonePlugin.goals;
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
 let running  = false;
 let stopFlag = false;
+let lastStart = 0;
 
 export function isSurvRunning() { return running; }
 
-export function startSurv(bot: Bot, getSafeMovements: () => any): void {
+export function startSurv(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void): void {
     if (running) { log('Already running. Use "gsurv stop" to stop.'); return; }
+    // Guard against rapid restart (e.g. loop-end timer + manual gsurv)
+    const now = Date.now();
+    if (now - lastStart < 10_000) { log('Restarted too soon — waiting...'); return; }
+    lastStart = now;
     running  = true;
     stopFlag = false;
     log('▶ Survival mode STARTED');
     log('Goal: collect wood → tools → stone → iron → diamonds');
-    runLoop(bot, getSafeMovements).catch(e => {
+    runLoop(bot, configureBaritone).catch(e => {
         logErr(`Fatal error: ${e?.message ?? e}`);
         running = false;
         if (getState() === BotState.COLLECTING) setState(BotState.IDLE);
@@ -46,7 +50,7 @@ export function startSurv(bot: Bot, getSafeMovements: () => any): void {
 }
 
 export function stopSurv(): void {
-    if (!running) { log('Not running.'); return; }
+    if (!running && !stopFlag) { log('Not running.'); return; }
     stopFlag = true;
     log('⏹ Stop requested — finishing current step...');
 }
@@ -94,23 +98,27 @@ function invSummary(bot: Bot): string {
 
 // ── Movement helpers ──────────────────────────────────────────────────────────
 
-async function goTo(bot: Bot, block: any, getSafeMovements: () => any): Promise<boolean> {
+async function goTo(bot: Bot, block: any, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
     try {
-        const mv = getSafeMovements();
-        mv.canDig = true;
-        bot.pathfinder.setMovements(mv);
-        await bot.pathfinder.goto(new GoalGetToBlock(block.position.x, block.position.y, block.position.z));
+        log(`  📍 Navigating to ${block.name ?? 'block'} at ${block.position.floored()}`);
+        configureBaritone({ breakBlocks: true, placeBlocks: true });
+        await bot.ashfinder.goto(new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2));
+        log(`  ✓ Reached destination`);
         return true;
     } catch (e: any) {
         logWarn(`Navigation failed: ${e?.message ?? e}`);
         return false;
+    } finally {
+        configureBaritone();
     }
 }
 
 // ── Mining ────────────────────────────────────────────────────────────────────
 
-async function mine(bot: Bot, blockNames: string[], needed: number, getSafeMovements: () => any, searchRadius = 64): Promise<number> {
+async function mine(bot: Bot, blockNames: string[], needed: number, configureBaritone: (overrides?: Record<string, any>) => void, searchRadius = 64): Promise<number> {
     let mined = 0;
+    let failures = 0;
+    const MAX_FAILURES = 10;
     log(`  ⛏ Looking for ${blockNames[0]} (need ${needed}, radius ${searchRadius})...`);
     while (mined < needed && !stopFlag) {
         const block = bot.findBlock({
@@ -122,15 +130,49 @@ async function mine(bot: Bot, blockNames: string[], needed: number, getSafeMovem
             break;
         }
         log(`  ⛏ Found ${block.name} at ${block.position.floored()}, going there...`);
-        const reached = await goTo(bot, block, getSafeMovements);
+        const blockPos = block.position.clone();
+        const reached = await goTo(bot, block, configureBaritone);
         if (!reached) { await sleep(500); continue; }
+        // Re-fetch block after navigation — the original reference may be stale
+        const freshBlock = bot.blockAt(blockPos);
+        if (!freshBlock || freshBlock.name !== block.name) { logWarn('  Block changed during navigation'); continue; }
+
+        const countBefore = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
+
         try {
-            await bot.dig(block);
-            mined++;
-            log(`  ✓ Mined ${block.name} (${mined}/${needed})`);
+            await bot.dig(freshBlock);
         } catch (e: any) {
             logWarn(`  Dig failed: ${e?.message ?? e}`);
+            failures++;
+            if (failures >= MAX_FAILURES) {
+                logWarn(`  Too many dig failures (${failures}) — giving up on this resource`);
+                break;
+            }
             await sleep(300);
+            continue;
+        }
+
+        // Wait up to 5s for item to enter inventory
+        await new Promise<void>(resolve => {
+            let done = false;
+            const check = () => {
+                if (done) return;
+                const countNow = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
+                if (countNow > countBefore) { done = true; cleanup(); resolve(); }
+            };
+            const cleanup = () => { done = true; bot.removeListener('playerCollect', check); bot.removeListener('physicsTick', check); };
+            bot.on('playerCollect', check);
+            bot.on('physicsTick', check);
+            setTimeout(() => { cleanup(); resolve(); }, 5000);
+        });
+
+        const countAfter = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
+        if (countAfter > countBefore) {
+            mined++;
+            failures = 0;
+            log(`  ✓ Mined ${block.name} (${mined}/${needed})`);
+        } else {
+            logWarn(`  Block broken but not picked up — skipping`);
         }
         await sleep(100);
     }
@@ -139,7 +181,7 @@ async function mine(bot: Bot, blockNames: string[], needed: number, getSafeMovem
 
 // ── Crafting ──────────────────────────────────────────────────────────────────
 
-async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, getSafeMovements?: () => any): Promise<boolean> {
+async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, configureBaritone?: (overrides?: Record<string, any>) => void): Promise<boolean> {
     const mcData = minecraftData(bot.version);
     const itemDef = mcData.itemsByName[itemName];
     if (!itemDef) { logWarn(`  Unknown item: ${itemName}`); return false; }
@@ -149,7 +191,7 @@ async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, 
         const tableId = mcData.blocksByName['crafting_table']?.id;
         table = bot.findBlock({ matching: tableId, maxDistance: 8 });
         if (!table) { logWarn(`  No crafting table nearby for ${itemName}`); return false; }
-        if (getSafeMovements) await goTo(bot, table, getSafeMovements);
+        if (configureBaritone) await goTo(bot, table, configureBaritone);
     }
 
     const recipes = bot.recipesFor(itemDef.id, null, 1, table);
@@ -167,7 +209,7 @@ async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, 
 
 // ── Place block ───────────────────────────────────────────────────────────────
 
-async function placeNearby(bot: Bot, itemName: string, getSafeMovements: () => any): Promise<boolean> {
+async function placeNearby(bot: Bot, itemName: string, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
     const item = bot.inventory.items().find(i => i.name === itemName);
     if (!item) { logWarn(`  Don't have ${itemName} to place`); return false; }
 
@@ -197,14 +239,22 @@ async function placeNearby(bot: Bot, itemName: string, getSafeMovements: () => a
 
 // ── Smelting ──────────────────────────────────────────────────────────────────
 
-async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: string, amount: number, getSafeMovements: () => any): Promise<boolean> {
+const FUEL_BURN_TICKS: Record<string, number> = {
+    coal: 1600, charcoal: 1600, stick: 100,
+    oak_log: 300, birch_log: 300, spruce_log: 300, jungle_log: 300,
+    acacia_log: 300, dark_oak_log: 300, mangrove_log: 300, cherry_log: 300,
+    oak_planks: 300, birch_planks: 300, spruce_planks: 300, jungle_planks: 300,
+    acacia_planks: 300, dark_oak_planks: 300, mangrove_planks: 300, cherry_planks: 300,
+};
+
+async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: string, amount: number, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
     log(`  🔥 Smelting ${amount}× ${inputName} → ${outputName}`);
 
     let furnaceBlock = bot.findBlock({ matching: b => b.name === 'furnace', maxDistance: 32 });
     if (!furnaceBlock) {
         if (!has(bot, 'furnace')) { logWarn('  No furnace in inventory'); return false; }
         log('  Placing furnace...');
-        const ok = await placeNearby(bot, 'furnace', getSafeMovements);
+        const ok = await placeNearby(bot, 'furnace', configureBaritone);
         if (!ok) return false;
         await sleep(600);
         furnaceBlock = bot.findBlock({ matching: b => b.name === 'furnace', maxDistance: 8 });
@@ -212,47 +262,60 @@ async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: 
     if (!furnaceBlock) { logWarn('  Furnace not found'); return false; }
 
     log(`  Going to furnace at ${furnaceBlock.position.floored()}...`);
-    await goTo(bot, furnaceBlock, getSafeMovements);
+    await goTo(bot, furnaceBlock, configureBaritone);
 
+    let furnace: any = null;
     try {
-        const furnace = await bot.openFurnace(furnaceBlock);
+        furnace = await bot.openFurnace(furnaceBlock);
         await sleep(400);
 
         const inputItem = bot.inventory.items().find(i => i.name === inputName);
         const fuelItem  = bot.inventory.items().find(i => i.name === fuelName);
-        if (!inputItem) { furnace.close(); logWarn(`  No ${inputName} in inventory`); return false; }
-        if (!fuelItem)  { furnace.close(); logWarn(`  No ${fuelName} for fuel`); return false; }
+        if (!inputItem) { logWarn(`  No ${inputName} in inventory`); return false; }
+        if (!fuelItem)  { logWarn(`  No ${fuelName} for fuel`); return false; }
 
         const toSmelt = Math.min(amount, inputItem.count);
-        log(`  Loading furnace: ${toSmelt}× ${inputName}, fuel: ${fuelItem.count}× ${fuelName}`);
-        await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, toSmelt + 2));
+
+        // H12: Calculate proper fuel amount based on burn time
+        const burnTicks = FUEL_BURN_TICKS[fuelName] ?? 200;
+        const itemsPerFuel = Math.max(1, Math.floor(burnTicks / 200));
+        const fuelNeeded = Math.ceil(toSmelt / itemsPerFuel) + 1;
+
+        log(`  Loading furnace: ${toSmelt}× ${inputName}, fuel: ${fuelItem.count}× ${fuelName} (burn=${burnTicks}t, ${itemsPerFuel} items/fuel, need ${fuelNeeded})`);
+        await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, fuelNeeded));
         await sleep(300);
         await furnace.putInput(inputItem.type, null, toSmelt);
 
-        // Wait for smelting — poll for output every 3s, timeout 90s
-        const deadline = Date.now() + 90_000;
+        // M10: Timeout scales with amount and fuel type
+        const deadline = Date.now() + Math.max(120_000, toSmelt * 12_000 + 30_000);
         let got = 0;
         while (got < toSmelt && Date.now() < deadline) {
             await sleep(3000);
-            if (stopFlag) { furnace.close(); return false; }
-            const out = furnace.outputItem();
-            if (out) {
-                log(`  ⏳ Output ready: ${out.count}× ${outputName}`);
-                await furnace.takeOutput();
-                got += out.count;
-                log(`  ✓ Collected ${got}/${toSmelt}× ${outputName}`);
-                if (got >= toSmelt) break;
-            } else {
-                log(`  ⏳ Smelting... (waiting for ${outputName})`);
+            if (stopFlag) { try { furnace.close(); } catch {} return false; }
+            try {
+                const out = furnace.outputItem();
+                if (out) {
+                    log(`  ⏳ Output ready: ${out.count}× ${outputName}`);
+                    await furnace.takeOutput();
+                    got += out.count;
+                    log(`  ✓ Collected ${got}/${toSmelt}× ${outputName}`);
+                    if (got >= toSmelt) break;
+                } else {
+                    log(`  ⏳ Smelting... (waiting for ${outputName})`);
+                }
+            } catch (e: any) {
+                logWarn(`  Furnace poll error: ${e?.message ?? e}`);
+                break;
             }
         }
 
-        furnace.close();
         if (got === 0) { logWarn('  Smelting timed out or produced nothing'); return false; }
         return true;
     } catch (e: any) {
         logWarn(`  Furnace error: ${e?.message ?? e}`);
         return false;
+    } finally {
+        try { furnace?.close(); } catch {}
     }
 }
 
@@ -268,7 +331,7 @@ async function equipBest(bot: Bot, toolType: 'pickaxe' | 'axe' | 'sword'): Promi
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
-async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
+async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void): Promise<void> {
     setState(BotState.COLLECTING);
 
     const LOG_LOGS = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
@@ -313,7 +376,7 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     log(`  Have ${logCount} logs`);
     if (logCount < 8) {
         await equipBest(bot, 'axe');
-        const got = await mine(bot, LOG_LOGS, 8 - logCount, getSafeMovements, 48);
+        const got = await mine(bot, LOG_LOGS, 8 - logCount, configureBaritone, 48);
         log(`  Collected ${got} logs. Total: ${countOf(bot, ...LOG_LOGS)}`);
     }
 
@@ -340,7 +403,7 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     }
     if (!bot.findBlock({ matching: b => b.name === 'crafting_table', maxDistance: 6 })) {
         if (!await step('  Placing crafting table...')) return;
-        await placeNearby(bot, 'crafting_table', getSafeMovements);
+        await placeNearby(bot, 'crafting_table', configureBaritone);
         await sleep(500);
     }
     log(`  ✓ Crafting table ready`);
@@ -349,10 +412,10 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     if (!await step('Phase 2 — Wooden tools')) return;
     log(`  Have: ${invSummary(bot)}`);
 
-    if (!has(bot, 'wooden_pickaxe')) { await craft(bot, 'wooden_pickaxe', 1, true, getSafeMovements); }
+    if (!has(bot, 'wooden_pickaxe')) { await craft(bot, 'wooden_pickaxe', 1, true, configureBaritone); }
     else log('  Already have wooden_pickaxe');
-    if (!has(bot, 'wooden_axe'))     { await craft(bot, 'wooden_axe',     1, true, getSafeMovements); }
-    if (!has(bot, 'wooden_shovel'))  { await craft(bot, 'wooden_shovel',  1, true, getSafeMovements); }
+    if (!has(bot, 'wooden_axe'))     { await craft(bot, 'wooden_axe',     1, true, configureBaritone); }
+    if (!has(bot, 'wooden_shovel'))  { await craft(bot, 'wooden_shovel',  1, true, configureBaritone); }
 
     // ── Phase 3: Stone ────────────────────────────────────────────────────────
     if (!await step('Phase 3 — Stone tools')) return;
@@ -362,15 +425,15 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     const cobbleCount = countOf(bot, ...COBBLE);
     log(`  Have ${cobbleCount} cobblestone`);
     if (cobbleCount < 12) {
-        const got = await mine(bot, STONE, 12 - cobbleCount, getSafeMovements, 32);
+        const got = await mine(bot, STONE, 12 - cobbleCount, configureBaritone, 32);
         log(`  Mined ${got} stone. Cobble total: ${countOf(bot, ...COBBLE)}`);
     }
 
-    if (!has(bot, 'stone_pickaxe')) await craft(bot, 'stone_pickaxe', 1, true, getSafeMovements);
+    if (!has(bot, 'stone_pickaxe')) await craft(bot, 'stone_pickaxe', 1, true, configureBaritone);
     else log('  Already have stone_pickaxe');
-    if (!has(bot, 'stone_axe'))     await craft(bot, 'stone_axe',     1, true, getSafeMovements);
-    if (!has(bot, 'stone_shovel'))  await craft(bot, 'stone_shovel',  1, true, getSafeMovements);
-    if (!has(bot, 'stone_sword'))   await craft(bot, 'stone_sword',   1, true, getSafeMovements);
+    if (!has(bot, 'stone_axe'))     await craft(bot, 'stone_axe',     1, true, configureBaritone);
+    if (!has(bot, 'stone_shovel'))  await craft(bot, 'stone_shovel',  1, true, configureBaritone);
+    if (!has(bot, 'stone_sword'))   await craft(bot, 'stone_sword',   1, true, configureBaritone);
     log(`  ✓ Stone tools done. Inv: ${invSummary(bot)}`);
 
     // ── Phase 4: Iron ─────────────────────────────────────────────────────────
@@ -384,33 +447,33 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     if (rawIron + ironIngot < 9) {
         const need = 9 - rawIron - ironIngot;
         log(`  Need ${need} more iron ore`);
-        await mine(bot, IRON_ORE, need, getSafeMovements, 48);
+        await mine(bot, IRON_ORE, need, configureBaritone, 48);
     }
 
     // Craft furnace if we don't have one
     if (!has(bot, 'furnace') && !bot.findBlock({ matching: b => b.name === 'furnace', maxDistance: 32 })) {
         if (!await step('  Crafting furnace (needs 8 cobblestone)...')) return;
         if (countOf(bot, ...COBBLE) >= 8) {
-            await craft(bot, 'furnace', 1, true, getSafeMovements);
+            await craft(bot, 'furnace', 1, true, configureBaritone);
         } else {
             logWarn('  Not enough cobblestone for furnace — mining more stone...');
-            await mine(bot, STONE, 8 - countOf(bot, ...COBBLE), getSafeMovements, 32);
-            await craft(bot, 'furnace', 1, true, getSafeMovements);
+            await mine(bot, STONE, 8 - countOf(bot, ...COBBLE), configureBaritone, 32);
+            await craft(bot, 'furnace', 1, true, configureBaritone);
         }
     }
 
     if (countOf(bot, 'iron_ingot') < 9) {
         const fuel = FUELS.find(f => has(bot, f)) ?? 'oak_planks';
         log(`  Using ${fuel} as fuel`);
-        await smelt(bot, 'raw_iron', fuel, 'iron_ingot', 9, getSafeMovements);
+        await smelt(bot, 'raw_iron', fuel, 'iron_ingot', 9, configureBaritone);
     }
 
     log(`  Iron ingots: ${countOf(bot, 'iron_ingot')}`);
-    if (!has(bot, 'iron_pickaxe')) await craft(bot, 'iron_pickaxe', 1, true, getSafeMovements);
+    if (!has(bot, 'iron_pickaxe')) await craft(bot, 'iron_pickaxe', 1, true, configureBaritone);
     else log('  Already have iron_pickaxe');
-    if (!has(bot, 'iron_axe'))     await craft(bot, 'iron_axe',     1, true, getSafeMovements);
-    if (!has(bot, 'iron_shovel'))  await craft(bot, 'iron_shovel',  1, true, getSafeMovements);
-    if (!has(bot, 'iron_sword'))   await craft(bot, 'iron_sword',   1, true, getSafeMovements);
+    if (!has(bot, 'iron_axe'))     await craft(bot, 'iron_axe',     1, true, configureBaritone);
+    if (!has(bot, 'iron_shovel'))  await craft(bot, 'iron_shovel',  1, true, configureBaritone);
+    if (!has(bot, 'iron_sword'))   await craft(bot, 'iron_sword',   1, true, configureBaritone);
     log(`  ✓ Iron tools done. Inv: ${invSummary(bot)}`);
 
     // ── Phase 5: Diamonds ─────────────────────────────────────────────────────
@@ -421,14 +484,14 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
     const diamonds = countOf(bot, 'diamond');
     log(`  Have ${diamonds} diamonds`);
     if (diamonds < 9) {
-        const got = await mine(bot, DIAMOND, 9 - diamonds, getSafeMovements, 64);
+        const got = await mine(bot, DIAMOND, 9 - diamonds, configureBaritone, 64);
         log(`  Mined ${got} diamond ore. Total diamonds: ${countOf(bot, 'diamond')}`);
     }
 
-    if (!has(bot, 'diamond_pickaxe')) await craft(bot, 'diamond_pickaxe', 1, true, getSafeMovements);
+    if (!has(bot, 'diamond_pickaxe')) await craft(bot, 'diamond_pickaxe', 1, true, configureBaritone);
     else log('  Already have diamond_pickaxe');
-    if (!has(bot, 'diamond_axe'))     await craft(bot, 'diamond_axe',     1, true, getSafeMovements);
-    if (!has(bot, 'diamond_sword'))   await craft(bot, 'diamond_sword',   1, true, getSafeMovements);
+    if (!has(bot, 'diamond_axe'))     await craft(bot, 'diamond_axe',     1, true, configureBaritone);
+    if (!has(bot, 'diamond_sword'))   await craft(bot, 'diamond_sword',   1, true, configureBaritone);
     log(`  ✓ Diamond tools done!`);
 
     // ── Loop complete ─────────────────────────────────────────────────────────
@@ -437,5 +500,10 @@ async function runLoop(bot: Bot, getSafeMovements: () => any): Promise<void> {
 
     running = false;
     setState(BotState.IDLE);
-    startSurv(bot, getSafeMovements);
+    if (stopFlag) {
+        stopFlag = false;
+        return;
+    }
+    // Use setTimeout instead of direct recursion to avoid unbounded stack
+    setTimeout(() => startSurv(bot, configureBaritone), 5000);
 }

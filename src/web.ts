@@ -1,6 +1,16 @@
 import HTTP from 'node:http';
 
 const PORT = process.env.PORT || 5500;
+let botConnected = false;
+let botState = 'disconnected';
+
+const escapeHtml = (s: string): string =>
+    s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+
+export function setBotHealthStatus(connected: boolean, state: string): void {
+    botConnected = connected;
+    botState = state;
+}
 
 export default (): void => {
 	const server = HTTP.createServer((request, response) => {
@@ -12,12 +22,16 @@ export default (): void => {
 				"Access-Control-Allow-Methods": "GET, OPTIONS"
 			});
 			response.end(JSON.stringify({
-				status: 'online',
+				status: botConnected ? 'online' : 'disconnected',
+				botState,
 				service: 'Gurabott',
 				timestamp: new Date().toISOString(),
 				uptime: process.uptime()
 			}));
 		} else if (request.url === '/status') {
+			const statusColor = botConnected ? '#00ff88' : '#ff4444';
+			const statusText = botConnected ? `Connected (${escapeHtml(botState)})` : 'Disconnected';
+			const statusIcon = botConnected ? '&#10003;' : '&#10007;';
 			// Status page for monitoring
 			response.writeHead(200, {
 				"Content-Type": "text/html",
@@ -36,14 +50,15 @@ export default (): void => {
 		.status { padding: 20px; background: #0a0a0a; border: 2px solid #00d4ff; border-radius: 5px; }
 		h1 { margin: 0; }
 		.info { margin-top: 10px; font-size: 14px; }
+		.status-dot { color: ${statusColor}; font-size: 18px; }
 	</style>
 </head>
 <body>
 	<div class="container">
 		<div class="status">
-			<h1>🤖 Gurabott Status</h1>
+			<h1>Gurabott Status</h1>
 			<div class="info">
-				<p>✓ Bot is running</p>
+				<p class="status-dot">${statusIcon} Bot: ${statusText}</p>
 				<p>Uptime: ${Math.floor(process.uptime())}s</p>
 				<p>Timestamp: ${new Date().toISOString()}</p>
 			</div>
@@ -58,10 +73,18 @@ export default (): void => {
 		}
 	});
 
+	server.on('error', (err: any) => {
+		if (err.code === 'EADDRINUSE') {
+			console.warn(`[WEB] Port ${PORT} in use, health server disabled`);
+		} else {
+			console.error(`[WEB] Health server error: ${err.message}`);
+		}
+	});
+
 	server.listen(PORT, () => {
-		console.log(`\n🌐 Health check server running on http://localhost:${PORT}`);
-		console.log(`   GET ${PORT}/health - JSON status`);
-		console.log(`   GET ${PORT}/status - HTML status page`);
-		console.log(`   GET 3007 - Live bot viewer\n`);
+		console.log(`[WEB] Health check server running on http://localhost:${PORT}`);
+		console.log(`[WEB]   GET /health - JSON status`);
+		console.log(`[WEB]   GET /status - HTML status page`);
+		console.log(`[WEB]   GET 3007 - Live bot viewer`);
 	});
 };

@@ -12,5 +12,6 @@
 		"allowSyntheticDefaultImports": true,
 		"skipLibCheck": true,
 		"forceConsistentCasingInFileNames": true
-	}
+	},
+	"exclude": ["src/bot_old.ts"]
 }

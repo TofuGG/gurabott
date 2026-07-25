@@ -11,6 +11,7 @@
 
 import blessed from 'blessed';
 import { BotState, getState, onStateChange } from './state.ts';
+import { parseChatMessage } from '../utils.ts';
 import type { Bot } from 'mineflayer';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -48,7 +49,8 @@ const COMMANDS: { label: string; cmd: string }[] = [
     { label: 'ghelp       - all cmds',    cmd: 'ghelp'      },
 ];
 
-const SUPPRESSED = ['[STUCK]', '[MovementAI]'];
+const SUPPRESSED: string[] = [];
+const MAX_LOG_LINES = 2000;
 function isSuppressed(text: string) { return SUPPRESSED.some(p => text.includes(p)); }
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -70,6 +72,20 @@ let showHelp        = false;
 let connected       = false;
 let aiEnabled       = false;
 let serverInfo      = '';
+let statsInterval: NodeJS.Timeout | null = null;
+let renderScheduled = false;
+let logLineCount = 0;
+let tuiAttached = false;
+let unsubStateChange: (() => void) | null = null;
+
+function scheduleRender(): void {
+    if (renderScheduled || !screen) return;
+    renderScheduled = true;
+    setImmediate(() => {
+        renderScheduled = false;
+        try { screen?.render(); } catch {}
+    });
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -77,7 +93,7 @@ const hpColor   = (v: number) => v > 14 ? '{green-fg}' : v > 7 ? '{yellow-fg}' :
 const foodColor = (v: number) => v > 14 ? '{green-fg}' : v > 7 ? '{yellow-fg}' : '{red-fg}';
 const hpBar     = (v: number, max = 20) => { const f = Math.round((v/max)*10); return '█'.repeat(f)+'░'.repeat(10-f); };
 const uptime    = (s: number) => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60); return h?`${h}h ${m}m`:`${m}m ${sec}s`; };
-const end       = (c: string) => c.replace('{','{/');
+const end       = (c: string) => c.replace(/\{/g, '{/');
 
 const STATE_COLORS: Record<BotState, string> = {
     [BotState.IDLE]:       '{green-fg}',
@@ -140,9 +156,9 @@ export function initTUI(opts: { onCommand: CommandHandler; aiEnabled: boolean; s
     buildLayout();
     setupKeypress();
 
-    onStateChange((_p, n) => { addLog('state', `State → ${n}`); renderStats(); });
-    screen.render();
-    setInterval(renderStats, 1500);
+    unsubStateChange = onStateChange((_p, n) => { addLog('state', `State → ${n}`); renderStats(); });
+    scheduleRender();
+    statsInterval = setInterval(renderStats, 1500);
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -179,7 +195,7 @@ function buildLayout(): void {
             fg: 'white', bg: 'black',
             border: { fg: 'blue' }, label: { fg: 'blue', bold: true },
             selected: { fg: 'black', bg: 'cyan' },
-        },
+        } as any,
         items: COMMANDS.map(c => c.label),
         mouse: true, keys: false, scrollable: true, vi: false,
         scrollbar: { ch: '│', style: { bg: 'blue' }, track: { bg: 'black' } },
@@ -361,17 +377,33 @@ export function addLog(type: TUILog['type'], text: string): void {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     const c  = COLORS[type];
     logBox.log(`{gray-fg}${ts}{/gray-fg} ${BADGES[type]} ${c}${text}${end(c)}`);
-    screen.render();
+    logLineCount++;
+    // Cap log lines to prevent TUI slowdown after long sessions
+    // blessed Log widget doesn't expose lines array, so we use logBox.log('')
+    // to track and periodically reset via.setContent
+    if (logLineCount > MAX_LOG_LINES) {
+        logLineCount = 0;
+        try {
+            logBox.log(`{yellow-fg}── Log trimmed (${MAX_LOG_LINES} lines) ──{/yellow-fg}`);
+            logBox.setContent('');
+        } catch {}
+    }
+    scheduleRender();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function attachBotToTUI(bot: Bot): void {
+    if (tuiAttached) return;
+    tuiAttached = true;
     botRef    = bot;
     connected = true;
     bot.on('end',    ()             => { connected = false; addLog('system', 'Disconnected'); renderStats(); });
     bot.on('login',  ()             => { connected = true;  addLog('system', `Logged in as ${bot.username}`); renderStats(); });
-    bot.on('chat',   (u: string, m: string) => { if (u !== bot.username) addLog('chat', `<${u}> ${m}`); });
+    bot.on('message', (jsonMsg: any) => {
+        const parsed = parseChatMessage(jsonMsg, bot.username);
+        if (parsed) addLog('chat', `[CHAT] <${parsed.username}> ${parsed.message}`);
+    });
     bot.on('error',  (e: Error)     => addLog('error', `Bot error: ${e.message}`));
     bot.on('kicked', (r: string)    => { connected = false; addLog('error', `Kicked: ${r}`); renderStats(); });
 }
@@ -385,8 +417,11 @@ export function updateAIStatus(enabled: boolean): void {
 }
 
 export function destroyTUI(): void {
+    if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+    if (unsubStateChange) { unsubStateChange(); unsubStateChange = null; }
     try { screen?.destroy(); } catch {}
     screen = null;
+    tuiAttached = false;
 }
 
 export function interceptConsole(): void {

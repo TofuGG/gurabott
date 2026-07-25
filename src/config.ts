@@ -26,6 +26,7 @@ export interface BotConfig {
         };
     };
     logLevel: string[];
+    greeting: boolean;
     action: {
         commands: string[];
         holdDuration: number;
@@ -55,6 +56,16 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
 
     let usePrevious = false;
     if (existing) {
+        // Validate existing config has required fields
+        if (existing.client) {
+            const portNum = parseInt(existing.client.port, 10);
+            if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+                console.warn(`Invalid port "${existing.client.port}" in config — will reconfigure.`);
+                existing.client.port = '25565';
+            }
+            if (!existing.client.host) existing.client.host = '127.0.0.1';
+            if (!existing.client.username) existing.client.username = 'Bot';
+        }
         const ans = await ask(`Use previous configuration? (y/n) [y]: `);
         usePrevious = ans.trim().toLowerCase() !== 'n'; // default yes
     }
@@ -73,6 +84,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
                 gui: { titleMatch: ['login', 'register', 'authme'], slotMap: {}, clickDelayMs: 500 },
             };
         }
+        if (config.greeting === undefined) config.greeting = true;
     } else {
         const host = (await ask(`Enter server IP [${existing?.client.host ?? '127.0.0.1'}]: `)) || existing?.client.host || '127.0.0.1';
         const port = (await ask(`Enter server port [${existing?.client.port ?? '25565'}]: `)) || existing?.client.port || '25565';
@@ -83,6 +95,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
             : 'YOUR_GROQ_API';
 
         const enableAuth = (await ask(`Does this server require a /login password? (y/n) [${existing?.auth?.enabled ? 'y' : 'n'}]: `)).trim().toLowerCase() === 'y';
+        const enableGreeting = (await ask(`Enable player greeting on join? (y/n) [y]: `)).trim().toLowerCase() !== 'n';
         const authPassword = enableAuth
             ? (await ask(`Enter login password [${existing?.auth?.password ? '***' : ''}]: `)) || existing?.auth?.password || ''
             : (existing?.auth?.password ?? '');
@@ -113,6 +126,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
                 },
             },
             logLevel: existing?.logLevel ?? ['error', 'log', 'debug'],
+            greeting: enableGreeting,
             action: existing?.action ?? {
                 commands: ['forward', 'back', 'left', 'right', 'jump'],
                 holdDuration: 5000,

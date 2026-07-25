@@ -123,7 +123,11 @@ async function runAnvilLogin(bot: Bot, cfg: AuthConfig): Promise<void> {
 }
 
 export function initAuth(bot: Bot, cfg: AuthConfig): void {
-    if (!cfg.enabled) return;
+    if (!cfg.enabled) {
+        addLog('system', '[AUTH] Auth disabled — skipping');
+        return;
+    }
+    addLog('system', `[AUTH] Auth enabled — mode: ${cfg.mode}`);
 
     if (cfg.mode === 'command' || cfg.mode === 'both') {
         // IMPORTANT: this must be 'login', not 'spawn'. mineflayer's 'spawn'

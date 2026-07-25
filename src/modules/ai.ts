@@ -4,9 +4,9 @@
  */
 
 import Groq from 'groq-sdk';
-import { sleep } from '../utils.js';
-import { addLog } from './tui.js';
-import { BotState, getState } from './state.js';
+import { sleep } from '../utils.ts';
+import { addLog } from './tui.ts';
+import { BotState, getState } from './state.ts';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -135,11 +135,12 @@ export async function getAIResponse(
     stateContext: string,
 ): Promise<ParsedAIResponse | null> {
     if (isRateLimited()) {
-        addLog('warn', 'AI rate limit reached, skipping response');
+        addLog('warn', '[AI] Rate limit reached, skipping response');
         return null;
     }
 
     if (!_history[username]) _history[username] = [];
+    addLog('ai', `[AI] Request from ${username} (trigger=${trigger}): "${message.slice(0, 50)}"`);
 
     const delay = trigger === 'chime' ? 3000 : 800;
     await sleep(delay);
@@ -158,15 +159,23 @@ export async function getAIResponse(
             chimeNote,
         ].filter(Boolean).join('\n');
 
-        const response = await ctx.groq.chat.completions.create({
-            model: ctx.model,
-            max_tokens: ctx.maxTokens,
-            messages: [
-                { role: 'system', content: systemContent },
-                ..._history[username],
-                { role: 'user', content: message },
-            ],
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15_000);
+
+        let response;
+        try {
+            response = await ctx.groq.chat.completions.create({
+                model: ctx.model,
+                max_tokens: ctx.maxTokens,
+                messages: [
+                    { role: 'system', content: systemContent },
+                    ..._history[username],
+                    { role: 'user', content: message },
+                ],
+            }, { signal: controller.signal as any });
+        } finally {
+            clearTimeout(timeout);
+        }
 
         const reply = response.choices[0]?.message?.content?.trim() ?? '';
 
@@ -186,7 +195,8 @@ export async function getAIResponse(
         return parseAIReply(reply);
 
     } catch (err: any) {
-        addLog('error', `Groq error: ${err?.message ?? err}`);
+        const msg = err?.name === 'AbortError' ? 'AI request timed out (15s)' : err?.message ?? err;
+        addLog('error', `[AI] Groq error: ${msg}`);
         return null;
     }
 }

@@ -4,22 +4,23 @@
  */
 
 import type { Bot } from 'mineflayer';
-import pathfinderLib from 'mineflayer-pathfinder';
+import baritonePlugin from '@miner-org/mineflayer-baritone';
+import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { sleep } from '../utils.ts';
 import { addLog } from './tui.ts';
 import { BotState, getState, setState, clearAllControls } from './state.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
+import { suppressMovement, resumeMovement } from '../movementAI.ts';
 
-const { goals } = pathfinderLib;
-const { GoalBlock, GoalGetToBlock, GoalFollow } = goals;
+const baritoneGoals = baritonePlugin.goals;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type CommandContext = {
     bot: Bot;
     personality: any;
-    getSafeMovements: () => any;
+    configureBaritone: (overrides?: Record<string, any>) => void;
     intervals: NodeJS.Timeout[];
     collecting: { active: boolean; summary: Record<string, number> };
     lastPlayerJoined: () => string | null;
@@ -90,7 +91,15 @@ const commands: Record<string, CommandFn> = {
     async ginvsee({ bot, personality }) {
         const items = bot.inventory.items();
         if (!items || items.length === 0) { bot.chat(personality.messages.emptyInventory); return; }
-        bot.chat(items.map((item, idx) => `${idx + 1}. ${item.name ?? 'unknown'} x${item.count ?? 0}`).join(', '));
+        // Truncate to avoid exceeding Minecraft's 256-char chat limit
+        const lines = items.map((item, idx) => `${idx + 1}. ${item.name ?? 'unknown'} x${item.count ?? 0}`);
+        let msg = lines[0] ?? '';
+        for (let i = 1; i < lines.length; i++) {
+            const next = msg + ', ' + lines[i];
+            if (next.length > 240) { msg += `... +${lines.length - i} more`; break; }
+            msg = next;
+        }
+        bot.chat(msg);
     },
 
     async geat({ bot, personality }, _username, args) {
@@ -201,7 +210,7 @@ const commands: Record<string, CommandFn> = {
         setTimeout(() => bot.removeListener('message', onMessage), 3000);
     },
 
-    async gfollow({ bot, personality, getSafeMovements }, username, args) {
+    async gfollow({ bot, personality, configureBaritone }, username, args) {
         let targetName = args[0];
         if (!targetName) { bot.chat('Usage: gfollow <player>'); return; }
         if (targetName.toLowerCase() === 'me') targetName = username;
@@ -211,10 +220,14 @@ const commands: Record<string, CommandFn> = {
             bot.chat(formatMsg(personality.messages.cantSeePlayer, { player: targetName }));
             return;
         }
+        // Stop any existing navigation before starting follow
+        try { bot.ashfinder.stop(); } catch {}
         setState(BotState.FOLLOWING);
         bot.chat(formatMsg(personality.messages.followingPlayer, { player: targetName }));
-        bot.pathfinder.setMovements(getSafeMovements());
-        bot.pathfinder.setGoal(new GoalFollow(playerEntity, 1), true);
+        configureBaritone();
+        bot.ashfinder.followEntity(playerEntity, { distance: 1 }).catch((err: any) => {
+            addLog('error', `[CMD] gfollow followEntity failed: ${err?.message ?? err}`);
+        });
     },
 
     async gsfollow({ bot, personality }) {
@@ -275,6 +288,7 @@ const commands: Record<string, CommandFn> = {
         if (!killTarget) { bot.chat('Usage: gkill <mob|player name>'); return; }
 
         const weapon = getBestWeapon(bot);
+        addLog('system', `[CMD] gkill target="${killTarget}" weapon=${weapon?.name ?? 'fist'}`);
 
         // Check for player first
         const playerEntry = (Object.values(bot.players) as any[]).find(
@@ -293,14 +307,15 @@ const commands: Record<string, CommandFn> = {
                 try { await bot.equip(weapon, 'hand'); } catch {}
             }
             setState(BotState.ATTACKING);
-            bot.pathfinder.setGoal(new GoalFollow(playerEntity, 1), true);
+            bot.ashfinder.followEntity(playerEntity, { distance: 1 }).catch(() => {});
 
             const attackInterval = setInterval(() => {
                 const stillExists = bot.players[playerEntry.username]?.entity;
                 if (!stillExists) {
                     clearInterval(attackInterval);
-                    intervals.splice(intervals.indexOf(attackInterval), 1);
-                    bot.pathfinder.setGoal(null);
+                    const idx = intervals.indexOf(attackInterval);
+                    if (idx !== -1) intervals.splice(idx, 1);
+                    bot.ashfinder.stop();
                     setState(BotState.IDLE);
                     bot.chat(formatMsg(personality.messages.playerGone, { player: playerEntry.username }));
                     return;
@@ -322,14 +337,15 @@ const commands: Record<string, CommandFn> = {
                 try { await bot.equip(weapon, 'hand'); } catch {}
             }
             setState(BotState.ATTACKING);
-            bot.pathfinder.setGoal(new GoalFollow(mobEntity, 1), true);
+            bot.ashfinder.followEntity(mobEntity, { distance: 1 }).catch(() => {});
 
             const attackInterval = setInterval(() => {
                 const stillExists = bot.entities[mobEntity.id];
                 if (!stillExists) {
                     clearInterval(attackInterval);
-                    intervals.splice(intervals.indexOf(attackInterval), 1);
-                    bot.pathfinder.setGoal(null);
+                    const idx = intervals.indexOf(attackInterval);
+                    if (idx !== -1) intervals.splice(idx, 1);
+                    bot.ashfinder.stop();
                     setState(BotState.IDLE);
                     bot.chat(formatMsg(personality.messages.mobDead, { mob: killTarget }));
                     return;
@@ -352,7 +368,7 @@ const commands: Record<string, CommandFn> = {
         );
     },
 
-    async gsleep({ bot, personality, getSafeMovements }) {
+    async gsleep({ bot, personality, configureBaritone }) {
         if (getState() !== BotState.IDLE) { bot.chat(personality.messages.busy); return; }
 
         const bed = bot.findBlock({
@@ -360,6 +376,8 @@ const commands: Record<string, CommandFn> = {
             maxDistance: 32,
         });
         if (!bed) { bot.chat(personality.messages.noBedNearby); return; }
+        const bedDist = bot.entity.position.distanceTo(bed.position);
+        addLog('system', `[CMD] gsleep — bed at ${bed.position.floored()} (${Math.round(bedDist)} blocks)`);
         if (bot.entity.position.distanceTo(bed.position) > 12) {
             bot.chat(personality.messages.bedTooFar);
             return;
@@ -368,9 +386,9 @@ const commands: Record<string, CommandFn> = {
         setState(BotState.SLEEPING);
         try {
             bot.chat(personality.messages.goingToSleep);
-            bot.pathfinder.setMovements(getSafeMovements());
+            configureBaritone();
             try {
-                await bot.pathfinder.goto(new GoalBlock(bed.position.x, bed.position.y, bed.position.z));
+                await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(bed.position.x, bed.position.y, bed.position.z)));
             } catch {
                 bot.chat(personality.messages.cantReachBed);
                 setState(BotState.IDLE);
@@ -384,12 +402,12 @@ const commands: Record<string, CommandFn> = {
             else if (msg.includes('obstructed')) bot.chat(personality.messages.bedBlocked);
             else bot.chat(personality.messages.cantSleep);
         } finally {
-            try { bot.pathfinder.setGoal(null); } catch {}
+            try { bot.ashfinder.stop(); } catch {}
             setState(BotState.IDLE);
         }
     },
 
-    async gopendoor({ bot, personality, getSafeMovements }) {
+    async gopendoor({ bot, personality, configureBaritone }) {
         const doorNames = [
             'oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door',
             'dark_oak_door', 'mangrove_door', 'cherry_door', 'crimson_door', 'warped_door',
@@ -401,13 +419,15 @@ const commands: Record<string, CommandFn> = {
             maxDistance: 16,
         });
         if (!door) { bot.chat(personality.messages.noDoorNearby); return; }
+        addLog('system', `[CMD] gopendoor — found ${door.name} at ${door.position.floored()}`);
 
         try {
-            bot.pathfinder.setMovements(getSafeMovements());
-            await bot.pathfinder.goto(new GoalGetToBlock(door.position.x, door.position.y, door.position.z));
+            configureBaritone();
+            await bot.ashfinder.goto(new baritoneGoals.GoalNear(new Vec3(door.position.x, door.position.y, door.position.z), 2));
             const freshDoor = bot.blockAt(door.position);
             if (!freshDoor) return;
-            if (freshDoor.getProperties?.()?.['open'] === 'true') {
+            const openVal = freshDoor.getProperties?.()?.['open'];
+            if (openVal === 'true' || openVal === true) {
                 bot.chat(personality.messages.doorAlreadyOpen);
                 return;
             }
@@ -416,11 +436,11 @@ const commands: Record<string, CommandFn> = {
         } catch { bot.chat(personality.messages.cantReachDoor); }
     },
 
-    async gcollect({ bot, personality, getSafeMovements, collecting }, _username, args) {
+    async gcollect({ bot, personality, configureBaritone, collecting }, _username, args) {
         const resourceGroups: Record<string, string[]> = {
             wood: [
-                'oak_log', 'acacia_log', 'birch_log', 'dark_oak_log', 'jungle_log',
-                'mangrove_log', 'spruce_log', 'oak_wood', 'acacia_wood', 'birch_wood',
+                'oak_log', 'acacia_log', 'birch_log', 'cherry_log', 'dark_oak_log', 'jungle_log',
+                'mangrove_log', 'spruce_log', 'oak_wood', 'acacia_wood', 'birch_wood', 'cherry_wood',
                 'dark_oak_wood', 'jungle_wood', 'mangrove_wood', 'spruce_wood',
             ],
             stone: ['stone', 'cobblestone'],
@@ -436,6 +456,8 @@ const commands: Record<string, CommandFn> = {
         }
 
         if (getState() !== BotState.IDLE) { bot.chat(personality.messages.busy); return; }
+
+        addLog('system', `[CMD] gcollect resource="${resourceType}" amount=${amount}`);
 
         const mcData = minecraftData(bot.version);
         const resourceTypes = resourceGroups[resourceType];
@@ -460,13 +482,49 @@ const commands: Record<string, CommandFn> = {
 
         const mineBlock = async (blockName: string, amountToMine: number): Promise<number> => {
             let collected = 0;
-            const blockId = mcData.blocksByName[blockName]?.id;
-            if (blockId === undefined) return 0;
+
+            const waitForPickup = (targetName: string): Promise<boolean> => {
+                return new Promise(resolve => {
+                    const countBefore = bot.inventory.items().filter(i => i.name === targetName).reduce((s, i) => s + i.count, 0);
+                    let resolved = false;
+
+                    const onCollect = () => {
+                        if (resolved) return;
+                        const countNow = bot.inventory.items().filter(i => i.name === targetName).reduce((s, i) => s + i.count, 0);
+                        if (countNow > countBefore) { resolved = true; cleanup(); resolve(true); }
+                    };
+                    const onPhys = () => { onCollect(); };
+                    const cleanup = () => { resolved = true; bot.removeListener('playerCollect', onCollect); bot.removeListener('physicsTick', onPhys); };
+
+                    bot.on('playerCollect', onCollect);
+                    bot.on('physicsTick', onPhys);
+                    setTimeout(() => { cleanup(); resolve(false); }, 5000);
+                });
+            };
+
+            const walkToDroppedItem = async (): Promise<boolean> => {
+                const itemEntity = Object.values(bot.entities).find((e: any) => e?.name === 'item');
+                if (!itemEntity || !itemEntity.position) return false;
+                try {
+                    configureBaritone({ breakBlocks: true });
+                    await bot.ashfinder.goto(
+                        new baritoneGoals.GoalNear(new Vec3(itemEntity.position.x, itemEntity.position.y, itemEntity.position.z), 1)
+                    );
+                    await sleep(1500);
+                } catch {}
+                return true;
+            };
+
+            const isMatchingBlock = (block: any, name: string): boolean => {
+                return block?.name === name;
+            };
 
             while (collected < amountToMine && collecting.active) {
-                let block = bot.findBlock({ matching: blockId, maxDistance: 16 });
-                if (!block) block = bot.findBlock({ matching: blockId, maxDistance: 32 });
-                if (!block) break;
+                let block = bot.findBlock({ matching: (b: any) => isMatchingBlock(b, blockName), maxDistance: 32 });
+                if (!block) {
+                    addLog('system', `[CMD] No ${blockName} found within 32 blocks, skipping`);
+                    break;
+                }
 
                 const tool = getBestTool(blockName);
                 if (tool) {
@@ -474,21 +532,39 @@ const commands: Record<string, CommandFn> = {
                 }
 
                 try {
-                    await bot.pathfinder.goto(
-                        new GoalGetToBlock(block.position.x, block.position.y, block.position.z)
+                    configureBaritone({ breakBlocks: true });
+                    await bot.ashfinder.goto(
+                        new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2)
                     );
-                } catch { break; }
+                } catch { await sleep(600); continue; }
 
                 const freshBlock = bot.blockAt(block.position);
                 if (!freshBlock || freshBlock.name !== blockName) continue;
 
+                const countBefore = bot.inventory.items().filter(i => i.name === blockName).reduce((s, i) => s + i.count, 0);
+
+                configureBaritone({ breakBlocks: true });
                 try {
                     await bot.dig(freshBlock);
-                    collected++;
-                    collecting.summary[blockName] = (collecting.summary[blockName] ?? 0) + 1;
-                    addLog('system', `Collected ${blockName} (${collected}/${amountToMine})`);
-                } catch {}
-                await sleep(600);
+                } catch { await sleep(600); continue; }
+
+                const pickedUp = await waitForPickup(blockName);
+
+                if (!pickedUp) {
+                    await walkToDroppedItem();
+                }
+
+                const countAfter = bot.inventory.items().filter(i => i.name === blockName).reduce((s, i) => s + i.count, 0);
+                if (countAfter > countBefore) {
+                    const got = countAfter - countBefore;
+                    collected += got;
+                    collecting.summary[blockName] = (collecting.summary[blockName] ?? 0) + got;
+                    addLog('system', `[CMD] Collected ${blockName} (${collected}/${amountToMine})`);
+                } else {
+                    addLog('warn', `[CMD] Block broken but item not picked up — skipping`);
+                }
+
+                await sleep(400);
             }
             return collected;
         };
@@ -504,9 +580,15 @@ const commands: Record<string, CommandFn> = {
         let totalCollected = 0;
         let remaining = amount;
 
-        for (const type of resourceTypes) {
-            if (remaining <= 0 || !collecting.active) break;
-            const got = await mineBlock(type, remaining);
+        while (remaining > 0 && collecting.active) {
+            const block = bot.findBlock({
+                matching: (b: any) => resourceTypes.includes(b?.name),
+                maxDistance: 32,
+            });
+            if (!block) break;
+
+            const blockName = block.name;
+            const got = await mineBlock(blockName, remaining);
             totalCollected += got;
             remaining -= got;
         }
@@ -539,7 +621,7 @@ const commands: Record<string, CommandFn> = {
         }));
         collecting.summary = {};
     },
-    async gsurv({ bot, getSafeMovements }, _username, args) {
+    async gsurv({ bot, configureBaritone }, _username, args) {
         const sub = args[0]?.toLowerCase();
         if (sub === 'stop') {
             stopSurv();
@@ -551,7 +633,7 @@ const commands: Record<string, CommandFn> = {
                 bot.chat('Survival already active! Use "gsurv stop" to stop.');
             } else {
                 bot.chat('▶ Starting survival mode...');
-                startSurv(bot, getSafeMovements);
+                startSurv(bot, configureBaritone);
             }
         }
     },
@@ -564,7 +646,7 @@ export async function handleCommand(
     username: string,
     rawMessage: string,
 ): Promise<boolean> {
-    if (!ctx.bot || !ctx.bot.inventory) return false;
+    if (!ctx.bot || !ctx.bot.inventory || !ctx.bot.entity) return false;
 
     const args = rawMessage.trim().split(/\s+/);
     const command = args.shift()?.toLowerCase() ?? '';
@@ -573,11 +655,14 @@ export async function handleCommand(
     const handler = commands[command];
     if (!handler) return false;
 
+    suppressMovement();
     try {
         // Pass ctx as 4th arg for glast (which needs lastPlayerJoined)
         await (handler as any)(ctx, username, args, ctx);
     } catch (err: any) {
-        addLog('error', `Command ${command} failed: ${err?.message ?? err}`);
+        addLog('error', `[CMD] Command ${command} failed: ${err?.message ?? err}`);
+    } finally {
+        resumeMovement();
     }
 
     return true;

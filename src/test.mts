@@ -1,8 +1,8 @@
 // Full regression test suite
-import { BotState, getState, setState, onStateChange, resetState } from './src/modules/state.ts';
-import { parseAIReply } from './src/modules/ai.ts';
-import { sleep, getRandom } from './src/utils.ts';
-import { initReconnect, triggerReconnect, resetReconnectAttempts } from './src/modules/connection.ts';
+import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
+import { parseAIReply } from './modules/ai.ts';
+import { sleep, getRandom } from './utils.ts';
+import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -100,7 +100,7 @@ await section('Connection Manager', async () => {
     initReconnect({ maxAttempts: 3, delayMs: 5, onReconnect: () => r++, onGiveUp: () => { gave = true; } });
     await triggerReconnect(); await triggerReconnect(); await triggerReconnect(); await triggerReconnect();
     assert('Reconnected 3 times', r === 3, r, 3);
-    assert('Gave up after max', gave === true);
+    assert('Gave up after max', gave);
 
     resetReconnectAttempts();
     let r2 = 0;

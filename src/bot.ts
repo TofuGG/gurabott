@@ -4,14 +4,12 @@
  */
 
 import Mineflayer from 'mineflayer';
-import pathfinderLib from 'mineflayer-pathfinder';
+import baritonePlugin from '@miner-org/mineflayer-baritone';
 import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 import Groq from 'groq-sdk';
 
-import { sleep, getRandom } from './utils.ts';
-import CONFIG from '../config.json' with { type: 'json' };
-import PERSONALITY from '../personality.json' with { type: 'json' };
+import { sleep, getRandom, parseChatMessage } from './utils.ts';
 
 import { BotState, attachBot, getState, setState, clearAllControls } from './modules/state.ts';
 import { addLog, attachBotToTUI, setConnected } from './modules/tui.ts';
@@ -21,26 +19,36 @@ import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecti
 import { initAuth } from './modules/auth.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI } from './movementAI.ts';
+import { setBotHealthStatus } from './web.ts';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import fs from 'fs';
 
-const { pathfinder, Movements } = pathfinderLib;
-const { goals } = pathfinderLib;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ── AI Setup ──────────────────────────────────────────────────────────────────
+const baritoneGoals = baritonePlugin.goals;
 
-const AI_ENABLED = CONFIG.ai.enabled && CONFIG.ai.apiKey && CONFIG.ai.apiKey !== 'YOUR_GROQ_API';
-const groq = AI_ENABLED ? new Groq({ apiKey: CONFIG.ai.apiKey }) : null;
+// BUG-1 FIX: Lazy-load JSON config files so they are read at createBot()
+// time (after the interactive setup has guaranteed they exist on disk)
+// rather than at module-graph resolution time (which crashes with
+// ERR_MODULE_NOT_FOUND on a fresh clone).
+function loadJson<T>(relativePath: string): T {
+    const p = path.join(__dirname, '..', relativePath);
+    try {
+        const raw = fs.readFileSync(p, 'utf-8');
+        addLog('system', `[BOT] Loaded ${relativePath}`);
+        return JSON.parse(raw) as T;
+    } catch (err: any) {
+        addLog('error', `[BOT] Failed to load ${relativePath}: ${err?.message ?? err}`);
+        throw new Error(`Cannot load ${relativePath}: ${err?.message ?? err}`);
+    }
+}
 
-const aiCtx: AIContext | null = AI_ENABLED && groq ? {
-    groq,
-    model: 'llama-3.1-8b-instant',
-    maxTokens: CONFIG.ai.maxTokens,
-    systemPrompt: (PERSONALITY as any).systemPrompt,
-    aiCommands: (PERSONALITY as any).aiCommands?.available ?? [],
-    responseFormat: (PERSONALITY as any).aiSettings?.responseFormat ?? '',
-    chimeDuration: (PERSONALITY as any).aiSettings?.chimeDuration ?? '',
-    glitchMessage: (PERSONALITY as any).messages?.glitchVoice ?? 'Glitch!',
-    maxHistoryPerPlayer: (PERSONALITY as any).aiSettings?.conversionHistoryPerPlayer ?? 20,
-} : null;
+let CONFIG: any;
+let PERSONALITY: any;
+let AI_ENABLED: boolean;
+let groq: any;
+let aiCtx: AIContext | null;
 
 // ── Bot State ─────────────────────────────────────────────────────────────────
 
@@ -51,6 +59,8 @@ const intervals: NodeJS.Timeout[] = [];
 let isEscapingStuck = false;
 let lastChimeTime = 0;
 let lastHurtMessageTime = 0;
+let aiDispatchLock = false;
+let spawned = false;
 
 const collecting = { active: false, summary: {} as Record<string, number> };
 
@@ -61,17 +71,26 @@ const HOSTILE_MOBS = new Set([
     'silverfish', 'endermite', 'guardian', 'elder_guardian', 'vex',
 ]);
 
-// ── Movements ─────────────────────────────────────────────────────────────────
+// ── Pathfinder Config ─────────────────────────────────────────────────────────
 
-function getSafeMovements(): any {
-    const movements = new Movements(bot);
-    movements.canDig = false;
-    movements.allowParkour = true;
-    movements.allowSprinting = true;
-    movements.canOpenDoors = true;
-    (movements as any).interactWithBlocks = true;
-    (movements as any).liquidCost = 100;
-    return movements;
+function configureBaritone(overrides?: Record<string, any>) {
+    if (!bot?.ashfinder) {
+        addLog('warn', '[BOT] configureBaritone called but ashfinder not ready');
+        return;
+    }
+    const cfg = bot.ashfinder.config;
+    cfg.breakBlocks = false;
+    cfg.placeBlocks = false;
+    cfg.parkour = true;
+    cfg.allowSprinting = true;
+    cfg.swimming = true;
+    cfg.maxFallDist = 3;
+    if (overrides) {
+        for (const [k, v] of Object.entries(overrides)) {
+            (cfg as any)[k] = v;
+        }
+        addLog('movement', `[MOV] configureBaritone overrides: ${Object.keys(overrides).join(', ')}`);
+    }
 }
 
 // ── Context builders ──────────────────────────────────────────────────────────
@@ -80,7 +99,7 @@ function buildCommandCtx(): CommandContext {
     return {
         bot,
         personality: PERSONALITY,
-        getSafeMovements,
+        configureBaritone,
         intervals,
         collecting,
         lastPlayerJoined: () => lastPlayerJoined,
@@ -129,52 +148,73 @@ async function handleAIResponse(
         bot.chat('Sorry, AI is not available. Use basic commands!');
         return;
     }
-
-    const parsed = await getAIResponse(aiCtx, username, message, trigger, buildAIStateContext());
-    if (!parsed) {
-        if (trigger !== 'chime') bot.chat(aiCtx.glitchMessage);
+    if (aiDispatchLock) {
+        addLog('warn', '[BOT] AI dispatch already in progress — skipping');
         return;
     }
-
-    if (parsed.chatText) bot.chat(parsed.chatText);
-
-    const ctx = buildCommandCtx();
-    for (const action of parsed.actions) {
-        switch (action.type) {
-            case 'FOLLOW':    await handleCommand(ctx, username, `gfollow ${action.target}`); break;
-            case 'COLLECT':   await handleCommand(ctx, username, `gcollect ${action.args}`); break;
-            case 'SLEEP':     await handleCommand(ctx, username, 'gsleep'); break;
-            case 'STOP':      await handleCommand(ctx, username, 'gsfollow'); break;
-            case 'OPEN_DOOR': await handleCommand(ctx, username, 'gopendoor'); break;
-            case 'DROP_ALL':  await handleCommand(ctx, username, 'gdump'); break;
-            case 'WALK':      await handleCommand(ctx, username, 'gwalk'); break;
-            case 'DROP': {
-                const items = bot.inventory.items();
-                const idx = items.findIndex(i => i.name === action.item);
-                if (idx !== -1) await handleCommand(ctx, username, `gdrop ${idx + 1} ${action.amount}`);
-                break;
-            }
-            case 'EAT': {
-                const items = bot.inventory.items();
-                const idx = items.findIndex(i => i.name === action.item);
-                if (idx !== -1) await handleCommand(ctx, username, `geat ${idx + 1} 1`);
-                break;
-            }
-            case 'JUMP':   await handleCommand(ctx, username, `gjump ${action.amount}`); break;
-            case 'CROUCH': await handleCommand(ctx, username, `gcr ${action.seconds}`); break;
+    aiDispatchLock = true;
+    try {
+        const parsed = await getAIResponse(aiCtx, username, message, trigger, buildAIStateContext());
+        if (!parsed) {
+            if (trigger !== 'chime') bot.chat(aiCtx.glitchMessage);
+            return;
         }
+
+        // H2: After await, check bot is still alive
+        if (!bot?.entity || (bot.health ?? 0) <= 0) {
+            addLog('warn', '[BOT] Bot died/disconnected during AI response — aborting actions');
+            return;
+        }
+
+        if (parsed.chatText) bot.chat(parsed.chatText);
+
+        const ctx = buildCommandCtx();
+        for (const action of parsed.actions) {
+            if (!bot?.entity || (bot.health ?? 0) <= 0) break;
+            switch (action.type) {
+                case 'FOLLOW':    await handleCommand(ctx, username, `gfollow ${action.target}`); break;
+                case 'COLLECT':   await handleCommand(ctx, username, `gcollect ${action.args}`); break;
+                case 'SLEEP':     await handleCommand(ctx, username, 'gsleep'); break;
+                case 'STOP':      await handleCommand(ctx, username, 'gsfollow'); break;
+                case 'OPEN_DOOR': await handleCommand(ctx, username, 'gopendoor'); break;
+                case 'DROP_ALL':  await handleCommand(ctx, username, 'gdump'); break;
+                case 'WALK':      await handleCommand(ctx, username, 'gwalk'); break;
+                case 'DROP': {
+                    const items = bot.inventory.items();
+                    const idx = items.findIndex(i => i.name === action.item);
+                    if (idx !== -1) await handleCommand(ctx, username, `gdrop ${idx + 1} ${action.amount}`);
+                    break;
+                }
+                case 'EAT': {
+                    const items = bot.inventory.items();
+                    const idx = items.findIndex(i => i.name === action.item);
+                    if (idx !== -1) await handleCommand(ctx, username, `geat ${idx + 1} 1`);
+                    break;
+                }
+                case 'JUMP':   await handleCommand(ctx, username, `gjump ${action.amount}`); break;
+                case 'CROUCH': await handleCommand(ctx, username, `gcr ${action.seconds}`); break;
+            }
+        }
+    } finally {
+        aiDispatchLock = false;
     }
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────
 
 const disconnect = (): void => {
+    addLog('system', '[BOT] Disconnecting — cleaning up intervals and listeners');
     setDisconnecting(true);
-    for (const i of intervals) clearInterval(i);
+    // Snapshot intervals before clearing — iterate the copy so concurrent
+    // pushes to the original array don't cause missed cleanup.
+    const snapshot = [...intervals];
     intervals.length = 0;
+    for (const t of snapshot) { clearTimeout(t); clearInterval(t); }
     try { bot?.removeAllListeners(); } catch {}
+    try { bot?.ashfinder?.removeAllListeners?.(); } catch {}
     try { bot?.quit(); } catch {}
     setDisconnecting(false);
+    addLog('system', '[BOT] Disconnect cleanup complete');
 };
 
 // ── Bot Creator ───────────────────────────────────────────────────────────────
@@ -183,6 +223,34 @@ export function createBot(
     config: { ip: string; port: number; username: string },
     mineflayerViewer?: any,
 ): void {
+    // BUG-1 FIX: Load config files lazily (after interactive setup guarantees they exist)
+    CONFIG = loadJson('config.json');
+    PERSONALITY = loadJson('personality.json');
+    AI_ENABLED = CONFIG.ai.enabled && CONFIG.ai.apiKey && CONFIG.ai.apiKey !== 'YOUR_GROQ_API';
+    groq = AI_ENABLED ? new Groq({ apiKey: CONFIG.ai.apiKey }) : null;
+    aiCtx = AI_ENABLED && groq ? {
+        groq,
+        model: 'llama-3.1-8b-instant',
+        maxTokens: CONFIG.ai.maxTokens,
+        systemPrompt: PERSONALITY.systemPrompt,
+        aiCommands: PERSONALITY.aiCommands?.available ?? [],
+        responseFormat: PERSONALITY.aiSettings?.responseFormat ?? '',
+        chimeDuration: PERSONALITY.aiSettings?.chimeDuration ?? '',
+        glitchMessage: PERSONALITY.messages?.glitchVoice ?? 'Glitch!',
+        maxHistoryPerPlayer: PERSONALITY.aiSettings?.conversionHistoryPerPlayer ?? 20,
+    } : null;
+
+    // Reset module-level state for clean reconnect
+    isEscapingStuck = false;
+    lastChimeTime = 0;
+    lastHurtMessageTime = 0;
+    aiDispatchLock = false;
+    spawned = false;
+    collecting.active = false;
+    collecting.summary = {};
+
+    addLog('system', `[BOT] createBot — AI: ${AI_ENABLED ? 'ON' : 'OFF'}, Host: ${config.ip}:${config.port}`);
+
     currentConfig = config;
 
     initReconnect({
@@ -204,7 +272,7 @@ export function createBot(
         version: (config as any).version || false,
     } as any);
 
-    bot.loadPlugin(pathfinder);
+    bot.loadPlugin(baritonePlugin.loader);
     attachBot(bot);
     attachBotToTUI(bot);
     // Input is now handled exclusively by the TUI (blessed). No readline here.
@@ -225,8 +293,9 @@ export function createBot(
     });
 
     bot.on('end', (reason) => {
-        addLog('warn', `Connection ended: ${reason}`);
+        addLog('warn', `[BOT] Connection ended: ${reason}`);
         setConnected(false);
+        setBotHealthStatus(false, 'disconnected');
         triggerReconnect();
     });
 
@@ -236,11 +305,14 @@ export function createBot(
 
     bot.once('login', () => {
         bot.setMaxListeners(40);
-        addLog('system', `Connected to ${config.ip}:${config.port} as ${config.username}`);
+        addLog('system', `[BOT] Connected to ${config.ip}:${config.port} as ${config.username}`);
         if (AI_ENABLED) {
-            setTimeout(() => {
-                try { bot.chat((PERSONALITY as any).messages.login); } catch {}
-            }, 500);
+            const loginMsg = (PERSONALITY as any).messages?.login;
+            if (loginMsg) {
+                setTimeout(() => {
+                    try { bot.chat(loginMsg); } catch {}
+                }, 500);
+            }
         }
     });
 
@@ -252,28 +324,34 @@ export function createBot(
         if (now - lastHurtMessageTime < 3000) return;
         lastHurtMessageTime = now;
 
-        const nearby = Object.values(bot.entities ?? {}).find(e =>
+        const nearby = Object.values(bot.entities ?? {}).find((e: any) =>
             e.position?.distanceTo(bot.entity.position) < 4 && e.type === 'mob'
-        );
+        ) as any;
 
-        const messages = (PERSONALITY as any).messages?.hurt ?? [];
+        const messages: string[] = (PERSONALITY as any).messages?.hurt ?? [];
         if (nearby?.name && messages.length > 0) {
-            bot.chat(messages[0].replace('{mob}', nearby.name));
-        } else {
+            bot.chat(getRandom(messages).replace('{mob}', nearby.name));
+        } else if (messages.length > 0) {
             bot.chat(getRandom(messages));
         }
     });
 
-    bot.on('chat', async (username, message) => {
-        if (!bot || username === bot.username) return;
+    bot.on('message', async (jsonMsg: any) => {
+        const parsed = parseChatMessage(jsonMsg, bot.username);
+        if (!parsed) return;
+        const { username, message } = parsed;
+
+        if (!bot || !bot.entity || (bot.health ?? 0) <= 0) return;
 
         // Always try commands first
         const ctx = buildCommandCtx();
         const handled = await handleCommand(ctx, username, message).catch(() => false);
 
-        // If it was a command (g-prefixed or handled), never pass to AI
-        const trimmed = message.trim();
-        if (handled || trimmed.toLowerCase().startsWith('g')) return;
+        // If it was a command (handled by the command dispatcher), never pass to AI
+        if (handled) return;
+
+        // H3: Re-check bot alive after command await
+        if (!bot?.entity || (bot.health ?? 0) <= 0) return;
 
         const botName = bot.username.toLowerCase();
         const msgLower = message.toLowerCase();
@@ -282,16 +360,26 @@ export function createBot(
         // Solo mode: bot is alone with one player — respond conversationally
         if (getOtherPlayerCount() === 1 && !msgLower.includes(botName)) {
             if (state === BotState.IDLE || state === BotState.FOLLOWING) {
-                await handleAIResponse(username, message, 'solo');
+                await handleAIResponse(username, message, 'solo').catch(err => {
+                    addLog('error', `[BOT] AI solo response failed: ${err?.message ?? err}`);
+                });
             }
             return;
         }
 
+        // H3: Re-check bot alive after AI await
+        if (!bot?.entity || (bot.health ?? 0) <= 0) return;
+
         // Direct mention
         if (msgLower.includes(botName)) {
-            await handleAIResponse(username, message, 'mentioned');
+            await handleAIResponse(username, message, 'mentioned').catch(err => {
+                addLog('error', `[BOT] AI mention response failed: ${err?.message ?? err}`);
+            });
             return;
         }
+
+        // H3: Re-check bot alive after AI await
+        if (!bot?.entity || (bot.health ?? 0) <= 0) return;
 
         // Chime on interesting keywords (only when idle, with cooldown)
         if (state !== BotState.IDLE) return;
@@ -302,7 +390,9 @@ export function createBot(
         const now = Date.now();
         if (now - lastChimeTime < 2 * 60 * 1000) return;
         lastChimeTime = now;
-        await handleAIResponse(username, message, 'chime');
+        await handleAIResponse(username, message, 'chime').catch(err => {
+            addLog('error', `[BOT] AI chime response failed: ${err?.message ?? err}`);
+        });
     });
 
     // ── Spawn ────────────────────────────────────────────────────────────────
@@ -313,19 +403,23 @@ export function createBot(
         resetReconnectAttempts();
         if (!bot?.entity) return;
 
-        addLog('system', `Bot spawned. Version: ${bot.version}. AI: ${AI_ENABLED ? 'ON' : 'OFF'}`);
+        addLog('system', `[BOT] Spawned — version: ${bot.version}, AI: ${AI_ENABLED ? 'ON' : 'OFF'}`);
+        addLog('system', `[BOT] Initializing modules...`);
+        setBotHealthStatus(true, 'spawning');
 
         if (mineflayerViewer) {
             try {
                 mineflayerViewer(bot, { port: 3007, firstPerson: false });
-                addLog('system', 'Viewer running on http://localhost:3007');
+                addLog('system', '[BOT] Viewer running on http://localhost:3007');
             } catch (err: any) {
-                addLog('warn', `Could not start viewer: ${err?.message}`);
+                addLog('warn', `[BOT] Could not start viewer: ${err?.message}`);
             }
         }
 
-        bot.pathfinder.setMovements(getSafeMovements());
+        configureBaritone();
+        addLog('system', '[BOT] Baritone configured');
         startStuckDetector(bot, (v) => { isEscapingStuck = v; });
+        addLog('system', '[BOT] Stuck detector started');
 
         for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
         await sleep(1000);
@@ -344,65 +438,74 @@ export function createBot(
 
         let waterEscaping = false;
         intervals.push(setInterval(async () => {
-            if (!bot?.entity?.position || getState() !== BotState.IDLE || waterEscaping) return;
-            const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-            const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
-            const isInWater = headBlock?.name?.includes('water') || feetBlock?.name?.includes('water');
-            if (!isInWater) {
-                bot.setControlState('jump', false);
-                bot.setControlState('forward', false);
-                return;
-            }
-
-            const botY = Math.floor(bot.entity.position.y);
-            const shore = bot.findBlock({
-                matching: (block) => !!(
-                    block?.name &&
-                    !block.name.includes('water') &&
-                    block.boundingBox === 'block' &&
-                    block.position?.y >= botY
-                ),
-                maxDistance: 20,
-            });
-
-            if (shore) {
-                await bot.lookAt(shore.position.offset(0.5, 1, 0.5));
-                bot.setControlState('jump', true);
-                bot.setControlState('forward', true);
-            } else {
-                waterEscaping = true;
-                bot.setControlState('jump', false);
-                bot.setControlState('forward', false);
-                try {
-                    const dryLand = bot.findBlock({
-                        matching: (block) => !!(block?.name && !block.name.includes('water') && block.boundingBox === 'block'),
-                        maxDistance: 32,
-                    });
-                    if (dryLand) {
-                        await bot.pathfinder.goto(new goals.GoalBlock(dryLand.position.x, dryLand.position.y + 1, dryLand.position.z));
-                    }
-                } catch {
-                    bot.setControlState('jump', true);
-                } finally {
-                    waterEscaping = false;
+            try {
+                if (!bot?.entity?.position || getState() !== BotState.IDLE || waterEscaping) return;
+                const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+                const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
+                const isInWater = headBlock?.name?.includes('water') || feetBlock?.name?.includes('water');
+                if (!isInWater) {
+                    bot.setControlState('jump', false);
+                    bot.setControlState('forward', false);
+                    return;
                 }
+
+                const botY = Math.floor(bot.entity.position.y);
+                const shore = bot.findBlock({
+                    matching: (block) => !!(
+                        block?.name &&
+                        !block.name.includes('water') &&
+                        block.boundingBox === 'block' &&
+                        block.position?.y >= botY
+                    ),
+                    maxDistance: 20,
+                });
+
+                if (shore) {
+                    await bot.lookAt(shore.position.offset(0.5, 1, 0.5));
+                    bot.setControlState('jump', true);
+                    bot.setControlState('forward', true);
+                } else {
+                    waterEscaping = true;
+                    bot.setControlState('jump', false);
+                    bot.setControlState('forward', false);
+                    try {
+                        const dryLand = bot.findBlock({
+                            matching: (block) => !!(block?.name && !block.name.includes('water') && block.boundingBox === 'block'),
+                            maxDistance: 32,
+                        });
+                        if (dryLand) {
+                            try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dryLand.position.x, dryLand.position.y + 1, dryLand.position.z))); } catch {}
+                        }
+                    } catch {
+                        bot.setControlState('jump', true);
+                    } finally {
+                        waterEscaping = false;
+                    }
+                }
+            } catch (err: any) {
+                addLog('error', `[BOT] Water escape interval error: ${err?.message ?? err}`);
             }
         }, 1000));
 
-        startMovementAI(bot, () => getState(), getSafeMovements, HOSTILE_MOBS, intervals, () => isEscapingStuck);
+        startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, intervals, () => isEscapingStuck);
+        addLog('system', '[BOT] Movement AI started');
+        addLog('system', '[BOT] All modules initialized');
+        setBotHealthStatus(true, 'idle');
+
+        // BUG-4 FIX: Clean up the temporary set — no longer needed after spawn
+        onlineBeforeSpawn.clear();
+        spawned = true;
     });
 
     // ── Player events ────────────────────────────────────────────────────────
 
     bot.on('playerJoined', (player) => {
         if (!player?.username || player.username === bot.username) return;
-        if (onlineBeforeSpawn.has(player.username)) {
-            onlineBeforeSpawn.delete(player.username);
-            return;
-        }
+        if (!spawned) return;
         lastPlayerJoined = player.username;
         addLog('system', `${player.username} joined the server`);
 
+        if (CONFIG.greeting === false) return;
         const templates: string[] = (PERSONALITY as any).messages?.playerJoined ?? [];
         if (templates.length > 0) {
             const msg = getRandom(templates).replace('{player}', player.username);
@@ -421,7 +524,7 @@ export function createBot(
     // Fight if ≤3 hostile mobs nearby; flee if overwhelmed or low HP.
 
     let combatActive    = false;
-    let combatInterval: NodeJS.Timeout | null = null;
+    let combatTimer: NodeJS.Timeout | null = null;
 
     function isHostileEntity(e: any): boolean {
         if (!e?.position || !e.name) return false;
@@ -451,7 +554,12 @@ export function createBot(
     }
 
     function stopCombat() {
-        if (combatInterval) { clearInterval(combatInterval); combatInterval = null; }
+        if (combatTimer) {
+            clearInterval(combatTimer);
+            const idx = intervals.indexOf(combatTimer);
+            if (idx !== -1) intervals.splice(idx, 1);
+            combatTimer = null;
+        }
         combatActive = false;
         if (getState() === BotState.ATTACKING || getState() === BotState.FLEEING) {
             setState(BotState.IDLE);
@@ -462,7 +570,7 @@ export function createBot(
         if (combatActive) return;
         combatActive = true;
         setState(BotState.ATTACKING);
-        addLog('system', `⚔ Fighting ${target.name}`);
+        addLog('system', `[BOT] ⚔ Fighting ${target.name} at distance ${Math.round(target.position?.distanceTo(bot.entity.position) ?? 0)}`);
 
         // Equip best weapon
         const weaponPriority = [
@@ -474,10 +582,10 @@ export function createBot(
             if (item) { bot.equip(item, 'hand').catch(() => {}); break; }
         }
 
-        bot.pathfinder.setMovements(getSafeMovements());
-        bot.pathfinder.setGoal(new goals.GoalFollow(target, 1), true);
+        configureBaritone();
+        bot.ashfinder.followEntity(target, { distance: 1 }).catch(() => {});
 
-        combatInterval = setInterval(() => {
+        combatTimer = setInterval(() => {
             const hp = bot.health ?? 20;
 
             // Flee if HP critical or mob count overwhelming
@@ -507,19 +615,15 @@ export function createBot(
             }
         }, 500);
 
-        intervals.push(combatInterval as any);
+        intervals.push(combatTimer);
     }
 
     function doFlee(threat: any) {
         if (getState() === BotState.FLEEING) return;
         setState(BotState.FLEEING);
-        addLog('system', `🏃 Fleeing from ${threat.name}`);
+        addLog('system', `[BOT] 🏃 Fleeing from ${threat.name} (HP: ${Math.round(bot.health ?? 20)})`);
 
-        const mv = getSafeMovements();
-        mv.allowSprinting = true;
-        bot.pathfinder.setMovements(mv);
-
-        let fleeTimer: NodeJS.Timeout | null = null;
+        configureBaritone({ allowSprinting: true });
 
         // Keep recalculating flee destination every 800ms so bot never stops
         function updateFleeGoal() {
@@ -532,7 +636,9 @@ export function createBot(
             const runX = botPos.x + (dx/len) * 16;
             const runZ = botPos.z + (dz/len) * 16;
             try {
-                bot.pathfinder.setGoal(new goals.GoalBlock(Math.round(runX), Math.round(botPos.y), Math.round(runZ)));
+                if (!bot.ashfinder.isPathing) {
+                    bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(Math.round(runX), Math.round(botPos.y), Math.round(runZ)))).catch(() => {});
+                }
             } catch {}
         }
 
@@ -541,13 +647,14 @@ export function createBot(
         intervals.push(fleeInterval as any);
 
         // Stop fleeing after 6s or when threat is gone
-        fleeTimer = setTimeout(() => {
+        const fleeStopTimer = setTimeout(() => {
             clearInterval(fleeInterval);
             if (getState() === BotState.FLEEING) {
-                bot.pathfinder.setGoal(null);
+                bot.ashfinder.stop();
                 setState(BotState.IDLE);
             }
         }, 6000);
+        intervals.push(fleeStopTimer as any);
     }
 
     // Trigger combat/flee whenever a mob moves into range
@@ -555,7 +662,7 @@ export function createBot(
         if (!bot?.entity) return;
         if (!isHostileEntity(entity)) return;
         if (combatActive) return;
-        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING) return;
+        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
         if ((bot.health ?? 20) <= 0) return;
 
         const dist = bot.entity.position.distanceTo(entity.position);
@@ -572,7 +679,7 @@ export function createBot(
     // Also scan for mobs every 2s even if they haven't moved (handles spawns)
     const hostileScanInterval = setInterval(() => {
         if (!bot?.entity || combatActive) return;
-        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING) return;
+        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
         const nearest = getNearestHostile();
         if (!nearest) return;
         const dist = nearest.position?.distanceTo(bot.entity.position) ?? Infinity;

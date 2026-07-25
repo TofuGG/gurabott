@@ -1,8 +1,9 @@
 import { Bot } from 'mineflayer';
-import pathfinderLib from 'mineflayer-pathfinder';
-const { goals } = pathfinderLib;
+import baritonePlugin from '@miner-org/mineflayer-baritone';
+const baritoneGoals = baritonePlugin.goals;
 import { Vec3 } from 'vec3';
 import { sleep } from './utils.ts';
+import { addLog } from './modules/tui.ts';
 
 const STUCK_TICK_THRESHOLD = 60;
 const MOVE_MIN = 0.06;
@@ -14,6 +15,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
     bot.on('physicsTick', () => {
         if (!bot.entity) return;
+        if ((bot.health ?? 0) <= 0) return;
 
         const pos = bot.entity.position;
         const moved = pos.distanceTo(lastPos);
@@ -33,7 +35,9 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
         if (stuckTicks >= STUCK_TICK_THRESHOLD && !escaping) {
             stuckTicks = 0;
-            unstuck(bot, pos.clone());
+            unstuck(bot, pos.clone()).catch(err => {
+                addLog('error', `[STUCK] Unstuck handler error: ${(err as any)?.message ?? err}`);
+            });
         }
     });
 
@@ -47,7 +51,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
         // If stuck more than 4 times in 30s, just wait it out — pathfinding isn't helping
         if (recentStucks > 4) {
-            // console.log(`[STUCK] Firing too frequently (${recentStucks}x) — pausing movement for 10s`);
+            addLog('warn', `[STUCK] Firing too frequently (${recentStucks}x) — pausing movement for 10s`);
             escaping = true;
             setEscaping?.(true);
             await sleep(10000);
@@ -59,7 +63,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
         escaping = true;
         setEscaping?.(true);
-        // console.log('[STUCK] Detected stuck at', stuckPos.toString(), '— escaping');
+        addLog('warn', `[STUCK] Detected stuck at ${stuckPos.floored()} — escaping`);
 
         try {
             bot.setControlState('jump', true);
@@ -87,16 +91,19 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
                 try {
                     const safeSpot = findSafeSpot(bot, stuckPos, 5);
                     if (safeSpot) {
-                        await bot.pathfinder.goto(new goals.GoalBlock(safeSpot.x, safeSpot.y, safeSpot.z));
+                        if (bot.ashfinder?.config) {
+                            bot.ashfinder.config.breakBlocks = true;
+                        }
+                        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(safeSpot.x, safeSpot.y, safeSpot.z)));
                     }
                 } catch (err) {
-                    // console.warn('[STUCK] Could not pathfind to safety:', (err as any).message);
+                    addLog('warn', `[STUCK] Could not pathfind to safety: ${(err as any).message}`);
                 }
             }
 
             escaping = false;
             setEscaping?.(false);
-            // console.log('[STUCK] Escape complete');
+            addLog('system', `[STUCK] Escape complete`);
         }
     }
 
@@ -113,7 +120,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
     }
 
     function findGroundLevel(bot: Bot, x: number, z: number, startY: number): number | null {
-        for (let y = startY + 3; y >= startY - 3; y--) {
+        for (let y = startY - 3; y <= startY + 3; y++) {
             const block = bot.blockAt(new Vec3(x, y, z));
             if (block && block.boundingBox === 'block') return y + 1;
         }

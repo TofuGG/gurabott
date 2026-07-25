@@ -1,16 +1,21 @@
 // src/movementAI.ts
 // Lightweight movement AI - contextual idle behavior for the bot.
-// Import and call startMovementAI(bot, getState, getSafeMovements) after spawn.
+// Import and call startMovementAI(bot, getState, configureBaritone) after spawn.
 
 import Mineflayer from 'mineflayer';
-import pathfinderLib from 'mineflayer-pathfinder';
+import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { Vec3 } from 'vec3';
 import { sleep } from './utils.ts';
 import { MapMemory, BehaviorName, BehaviorWeightMap } from './mapMemory.ts';
+import { addLog } from './modules/tui.ts';
 
-const { goals } = pathfinderLib;
-import pathfinderLibMod from 'mineflayer-pathfinder';
-const { Movements } = pathfinderLibMod;
+// ── Movement suppression ───────────────────────────────────────────────────────
+let suppressed = false;
+
+export function suppressMovement(): void { suppressed = true; }
+export function resumeMovement(): void { suppressed = false; }
+
+const baritoneGoals = baritonePlugin.goals;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -277,34 +282,36 @@ async function doStandLook(bot: Mineflayer.Bot) {
     }
 }
 
-async function doShortStroll(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory, minDist = 3, maxDist = 8) {
+async function doShortStroll(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 3, maxDist = 8) {
     const dest = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
-    bot.pathfinder.setMovements(getSafeMovements());
-    try { await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z)); } catch {}
+    configureBaritone();
+    try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z))); } catch {}
     // Look around briefly on arrival — no fixed pause, scheduler handles timing
     try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.3) - 0.1, false); } catch {}
 }
 
-async function doLongWalk(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory, minDist = 8, maxDist = 22) {
+async function doLongWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 8, maxDist = 22) {
     const dest = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
-    const mv = getSafeMovements();
-    mv.allowSprinting = Math.random() < 0.35;
-    mv.allowParkour = false; // don't jump into water gaps
-    bot.pathfinder.setMovements(mv);
-    try { await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z)); } catch {}
+    configureBaritone({ allowSprinting: Math.random() < 0.35, parkour: false });
+    try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z))); } catch {}
 }
 
-async function doDistractedWalk(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory, minDist = 5, maxDist = 15) {
+async function doDistractedWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 5, maxDist = 15) {
     const dest = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
-    bot.pathfinder.setMovements(getSafeMovements());
-    // Walk then stop partway — no artificial delay, just cancel goal mid-walk
-    bot.pathfinder.setGoal(new goals.GoalBlock(dest.x, dest.y, dest.z));
+    configureBaritone();
+    // Fire-and-forget navigation — cancel after a random delay for the "distracted" effect
+    const destVec = new Vec3(dest.x, dest.y, dest.z);
+    try { bot.ashfinder.goto(new baritoneGoals.GoalExact(destVec)); } catch {}
     await new Promise<void>(resolve => {
-        const t = setTimeout(() => { bot.pathfinder.setGoal(null); resolve(); }, 1200 + Math.random() * 1800);
-        bot.once('goal_reached', () => { clearTimeout(t); resolve(); });
+        const t = setTimeout(() => { try { bot.ashfinder.stop(); } catch {} resolve(); }, 1200 + Math.random() * 1800);
+        const onReach = () => { clearTimeout(t); resolve(); };
+        bot.ashfinder.once('goal-reach', onReach);
+        // Also clean up the listener if the timeout fires first
+        const origResolve = resolve;
+        resolve = () => { try { bot.ashfinder.off('goal-reach', onReach); } catch {} origResolve(); };
     });
     try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.5) - 0.1, false); } catch {}
 }
@@ -338,29 +345,39 @@ async function doLookAtSky(bot: Mineflayer.Bot) {
     await sleep(600);
 }
 
-async function doPaceBackForth(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory, minDist = 3, maxDist = 6) {
+async function doPaceBackForth(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 3, maxDist = 6) {
     const dest   = randomNearbyGround(bot, minDist, maxDist, memory);
     if (!dest || isWaterAt(bot, dest)) return;
     const origin = randomNearbyGround(bot, 0, 1) ?? bot.entity.position.clone().floored();
-    bot.pathfinder.setMovements(getSafeMovements());
-    try { await bot.pathfinder.goto(new goals.GoalBlock(dest.x, dest.y, dest.z)); } catch {}
-    try { await bot.pathfinder.goto(new goals.GoalBlock(Math.round(origin.x), Math.round(origin.y), Math.round(origin.z))); } catch {}
+    configureBaritone();
+    try {
+        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z)));
+    } catch {
+        try { bot.ashfinder.stop(); } catch {}
+        return;
+    }
+    try {
+        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(Math.round(origin.x), Math.round(origin.y), Math.round(origin.z))));
+    } catch {
+        try { bot.ashfinder.stop(); } catch {}
+    }
 }
 
-async function doCircleSpot(bot: Mineflayer.Bot, getSafeMovements: () => any, memory?: MapMemory) {
+async function doCircleSpot(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory) {
     const pos = bot.entity.position;
     const radius = 3 + Math.floor(Math.random() * 3);
     const steps = 4 + Math.floor(Math.random() * 3);
     const startAngle = Math.random() * Math.PI * 2;
-    bot.pathfinder.setMovements(getSafeMovements());
+    configureBaritone();
     for (let i = 0; i < steps; i++) {
-        if (bot.pathfinder.isMoving?.() === false && i > 0) break;
+        if (!bot.ashfinder.isPathing && i > 0) break;
         const angle = startAngle + (i / steps) * Math.PI * 2;
         const tx = Math.round(pos.x + Math.cos(angle) * radius);
         const tz = Math.round(pos.z + Math.sin(angle) * radius);
-        const dest = randomNearbyGround(bot, 0, 1) ?? new Vec3(tx, Math.round(pos.y), tz);
-        const target = new Vec3(tx, Math.round(pos.y), tz);
-        try { await bot.pathfinder.goto(new goals.GoalBlock(target.x, target.y, target.z)); } catch {}
+        const fallback = new Vec3(tx, Math.round(pos.y), tz);
+        const validated = randomNearbyGround(bot, 0, 1, memory);
+        const target = validated ?? fallback;
+        try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(target.x, target.y, target.z))); } catch {}
     }
 }
 
@@ -371,14 +388,14 @@ async function doCircleSpot(bot: Mineflayer.Bot, getSafeMovements: () => any, me
  *
  * @param bot            The mineflayer Bot instance
  * @param getState       Callback returning the current BotState string
- * @param getSafeMovements  Callback returning a configured Movements object
+ * @param configureBaritone  Callback to configure baritone pathfinding options
  * @param HOSTILE_MOBS   Set of hostile mob names (lowercase)
  * @param intervals      Shared intervals array (for cleanup on disconnect)
  */
 export function startMovementAI(
     bot: Mineflayer.Bot,
     getState: () => string,
-    getSafeMovements: () => any,
+    configureBaritone: (overrides?: Record<string, any>) => void,
     HOSTILE_MOBS: Set<string>,
     intervals: NodeJS.Timeout[],
     isEscaping?: () => boolean,
@@ -393,6 +410,7 @@ export function startMovementAI(
     // Glance at players who walk close — feels reactive and aware
     let lastGlanceTime = 0;
     bot.on('entityMoved', (entity: any) => {
+        if (suppressed) return;
         if (active) return; // don't interrupt a behavior
         if (getState() !== 'idle') return;
         if (isEscaping?.()) return;
@@ -437,15 +455,15 @@ export function startMovementAI(
 
     async function tick(): Promise<WanderBehavior | null> {
         // Only run when bot is idle
-        if (getState() !== 'idle' || active || !bot.entity?.onGround || isEscaping?.()) return null;
+        if (suppressed || getState() !== 'idle' || active || !bot.entity?.onGround || isEscaping?.()) return null;
         active = true;
 
         let trackFall: (() => void) | null = null;
         try {
             const ctx = buildContext(bot, HOSTILE_MOBS);
-            // Don't wander if in water or if pathfinder is already doing something
+            // Don't wander if in water or if baritone is already pathing
             if (ctx.isInWater) return null;
-            if ((bot.pathfinder as any).isMoving?.()) return null;
+            if (bot.ashfinder.isPathing) return null;
 
             // Merge static context weights with learned weights from memory
             const contextWeights = getBehaviorWeights(ctx);
@@ -465,7 +483,7 @@ export function startMovementAI(
                     distracted_walk: 0, pace_back_forth: 5, circle_spot: 0,
                 };
                 const behavior = pickWeighted(stationaryOnly);
-                // console.log(`[MovementAI] ${behavior} (tiny island, safeRadius=${safeRadius})`);
+                addLog('movement', `[MOV] ${behavior} (tiny island, safeRadius=${safeRadius})`);
 
                 stuckDuringBehavior = false;
                 const startPos = bot.entity.position.clone();
@@ -490,7 +508,7 @@ export function startMovementAI(
             };
 
             const behavior = pickWeighted(merged);
-            // console.log(`[MovementAI] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
+            addLog('movement', `[MOV] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
 
             stuckDuringBehavior = false;
             const startPos = bot.entity.position.clone();
@@ -503,14 +521,14 @@ export function startMovementAI(
 
             switch (behavior) {
                 case 'stand_look':      await doStandLook(bot); break;
-                case 'short_stroll':    await doShortStroll(bot, getSafeMovements, memory, ...clampDist(3, 8)); break;
-                case 'long_walk':       await doLongWalk(bot, getSafeMovements, memory, ...clampDist(8, 22)); break;
-                case 'distracted_walk': await doDistractedWalk(bot, getSafeMovements, memory, ...clampDist(5, 15)); break;
+                case 'short_stroll':    await doShortStroll(bot, configureBaritone, memory, ...clampDist(3, 8)); break;
+                case 'long_walk':       await doLongWalk(bot, configureBaritone, memory, ...clampDist(8, 22)); break;
+                case 'distracted_walk': await doDistractedWalk(bot, configureBaritone, memory, ...clampDist(5, 15)); break;
                 case 'crouch_fidget':   await doCrouchFidget(bot); break;
                 case 'look_at_player':  await doLookAtPlayer(bot); break;
                 case 'look_at_sky':     await doLookAtSky(bot); break;
-                case 'pace_back_forth': await doPaceBackForth(bot, getSafeMovements, memory, ...clampDist(3, 6)); break;
-                case 'circle_spot':     await doCircleSpot(bot, getSafeMovements, memory); break;
+                case 'pace_back_forth': await doPaceBackForth(bot, configureBaritone, memory, ...clampDist(3, 6)); break;
+                case 'circle_spot':     await doCircleSpot(bot, configureBaritone, memory); break;
             }
 
             if (memory) {
@@ -546,11 +564,12 @@ export function startMovementAI(
 
             return behavior;
         } catch (err) {
-            // console.warn('[MovementAI] tick error:', (err as any).message);
+            addLog('warn', `[MOV] tick error: ${(err as any).message}`);
             return null;
         } finally {
             if (trackFall) bot.off('physicsTick', trackFall);
             clearControls();
+            if (!suppressed) configureBaritone();
             active = false;
         }
         return null;
@@ -591,6 +610,7 @@ export function startMovementAI(
         if (!bot.entity) return;
         const delay = nextDelay(lastBehavior);
         const t = setTimeout(async () => {
+            if (!bot.entity) return;
             const behaviorRan = await tick();
             if (behaviorRan) lastBehavior = behaviorRan;
             ticksSinceObservation++;

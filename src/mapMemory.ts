@@ -4,13 +4,14 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as readline from 'readline';
+import { fileURLToPath } from 'url';
 import { Vec3 } from 'vec3';
 import Mineflayer from 'mineflayer';
+import { addLog } from './modules/tui.ts';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DATA_DIR = path.resolve('./data');
+const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 
 export const BEHAVIOR_NAMES = [
     'stand_look', 'short_stroll', 'long_walk', 'distracted_walk',
@@ -26,7 +27,8 @@ const PENALTY = 0.6;      // multiplier on failure
 const MIN_WEIGHT = 1;
 const MAX_WEIGHT = 80;
 const BAD_SPOT_RADIUS = 3;
-const DEATH_BAD_SPOT_RADIUS = 10; // much wider exclusion zone around death spots
+const DEATH_BAD_SPOT_RADIUS = 10;
+const MAX_BAD_SPOTS = 200;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type BehaviorWeightMap = Record<BehaviorName, number>;
@@ -59,25 +61,6 @@ function mapPath(name: string): string {
     return path.join(DATA_DIR, `${name}.json`);
 }
 
-function listMaps(): string[] {
-    ensureDataDir();
-    return fs.readdirSync(DATA_DIR)
-        .filter(f => f.endsWith('.json'))
-        .map(f => f.replace('.json', ''));
-}
-
-function loadMap(name: string): MapData {
-    const p = mapPath(name);
-    if (!fs.existsSync(p)) throw new Error(`Map "${name}" not found`);
-    return JSON.parse(fs.readFileSync(p, 'utf-8')) as MapData;
-}
-
-function saveMap(data: MapData) {
-    ensureDataDir();
-    data.lastUsed = Date.now();
-    fs.writeFileSync(mapPath(data.name), JSON.stringify(data, null, 2));
-}
-
 function defaultWeights(): BehaviorWeightMap {
     return Object.fromEntries(BEHAVIOR_NAMES.map(n => [n, DEFAULT_WEIGHT])) as BehaviorWeightMap;
 }
@@ -86,80 +69,13 @@ function clamp(v: number) {
     return Math.max(MIN_WEIGHT, Math.min(MAX_WEIGHT, v));
 }
 
-function ask(rl: readline.Interface, question: string): Promise<string> {
-    return new Promise(resolve => rl.question(question, resolve));
-}
-
-// ── Startup prompt ───────────────────────────────────────────────────────────
-
-export async function selectOrCreateMap(rl: readline.Interface): Promise<MapData> {
-    ensureDataDir();
-    const maps = listMaps();
-
-    console.log('\n📦 Map Memory\n');
-
-    if (maps.length === 0) {
-        console.log('No saved maps found. Creating a new one.\n');
-        return createNewMap(rl);
-    }
-
-    console.log('Do you want to use an existing map or create a new one?');
-    console.log('  1. Use existing map');
-    console.log('  2. Create new map\n');
-
-    while (true) {
-        const choice = (await ask(rl, 'Choice (1/2): ')).trim();
-
-        if (choice === '2') return createNewMap(rl);
-
-        if (choice === '1') {
-            console.log('\nSaved maps:');
-            maps.forEach((name, i) => {
-                const data = loadMap(name);
-                const date = new Date(data.lastUsed).toLocaleString();
-                console.log(`  ${i + 1}. ${name}  (last used: ${date})`);
-            });
-            console.log('');
-
-            while (true) {
-                const pick = (await ask(rl, `Pick a map (1–${maps.length}): `)).trim();
-                const idx = parseInt(pick, 10) - 1;
-                if (!isNaN(idx) && idx >= 0 && idx < maps.length) {
-                    const data = loadMap(maps[idx]);
-                    console.log(`✓ Loaded map: ${data.name}\n`);
-                    return data;
-                }
-                console.log('Invalid choice, try again.');
-            }
-        }
-
-        console.log('Please enter 1 or 2.');
-    }
-}
-
-async function createNewMap(rl: readline.Interface): Promise<MapData> {
-    while (true) {
-        const raw = (await ask(rl, 'Enter a name for this map: ')).trim();
-        const name = raw.replace(/[^a-zA-Z0-9_\-]/g, '_'); // sanitize
-
-        if (!name) { console.log('Name cannot be empty.'); continue; }
-
-        if (fs.existsSync(mapPath(name))) {
-            const overwrite = (await ask(rl, `"${name}" already exists. Overwrite? (y/n): `)).trim().toLowerCase();
-            if (overwrite !== 'y') continue;
-        }
-
-        const data: MapData = {
-            name,
-            createdAt: Date.now(),
-            lastUsed: Date.now(),
-            behaviorWeights: defaultWeights(),
-            badSpots: [],
-            blockObservations: [],
-        };
-        saveMap(data);
-        console.log(`✓ Created map: ${name}\n`);
-        return data;
+function saveMap(data: MapData) {
+    try {
+        ensureDataDir();
+        data.lastUsed = Date.now();
+        fs.writeFileSync(mapPath(data.name), JSON.stringify(data, null, 2));
+    } catch (err: any) {
+        addLog('error', `[MEM] Failed to save ${data.name}: ${err?.message ?? err}`);
     }
 }
 
@@ -169,9 +85,20 @@ export class MapMemory {
     private data: MapData;
     private dirty = false;
     private saveTimer: NodeJS.Timeout | null = null;
+    private _deathKeys: Set<string> | null = null;
+    private _blockObsIndex: Map<string, number> | null = null;
 
     constructor(data: MapData) {
         this.data = data;
+        this.rebuildBlockIndex();
+    }
+
+    private rebuildBlockIndex(): void {
+        this._blockObsIndex = new Map();
+        for (let i = 0; i < this.data.blockObservations.length; i++) {
+            const o = this.data.blockObservations[i];
+            this._blockObsIndex.set(`${o.x},${o.y},${o.z}`, i);
+        }
     }
 
     get name() { return this.data.name; }
@@ -185,14 +112,14 @@ export class MapMemory {
     reward(behavior: BehaviorName) {
         const w = this.data.behaviorWeights;
         w[behavior] = clamp(w[behavior] * REWARD);
-        console.log(`[MapMemory] ✓ reward ${behavior} → ${w[behavior].toFixed(1)}`);
+        addLog('system', `[MEM] ✓ reward ${behavior} → ${w[behavior].toFixed(1)}`);
         this.scheduleSave();
     }
 
     penalize(behavior: BehaviorName, reason: 'stuck' | 'fell' | 'water') {
         const w = this.data.behaviorWeights;
         w[behavior] = clamp(w[behavior] * PENALTY);
-        console.log(`[MapMemory] ✗ penalize ${behavior} (${reason}) → ${w[behavior].toFixed(1)}`);
+        addLog('system', `[MEM] ✗ penalize ${behavior} (${reason}) → ${w[behavior].toFixed(1)}`);
         this.scheduleSave();
     }
 
@@ -209,11 +136,20 @@ export class MapMemory {
         if (this.data.deaths.length > 50) this.data.deaths = this.data.deaths.slice(-50);
 
         // Add a wide bad spot so the bot won't wander back to the death area
-        this.data.badSpots.push({
-            x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z),
-            reason: 'fell'
-        });
-        console.log(`[MapMemory] Death recorded at (${entry.x}, ${entry.y}, ${entry.z}) — exclusion zone ${DEATH_BAD_SPOT_RADIUS} blocks`);
+        const bx = Math.round(pos.x), by = Math.round(pos.y), bz = Math.round(pos.z);
+        const exists = this.data.badSpots.some(s =>
+            Math.abs(s.x - bx) < DEATH_BAD_SPOT_RADIUS &&
+            Math.abs(s.y - by) < DEATH_BAD_SPOT_RADIUS &&
+            Math.abs(s.z - bz) < DEATH_BAD_SPOT_RADIUS
+        );
+        if (!exists) {
+            this.data.badSpots.push({ x: bx, y: by, z: bz, reason: 'fell' });
+            if (this.data.badSpots.length > MAX_BAD_SPOTS) {
+                this.data.badSpots = this.data.badSpots.slice(-MAX_BAD_SPOTS);
+            }
+        }
+        this._deathKeys = null;
+        addLog('system', `[MEM] Death recorded at (${entry.x}, ${entry.y}, ${entry.z}) — exclusion zone ${DEATH_BAD_SPOT_RADIUS} blocks`);
         this.scheduleSave();
     }
 
@@ -226,7 +162,10 @@ export class MapMemory {
         );
         if (exists) return;
         this.data.badSpots.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), reason });
-        console.log(`[MapMemory] Bad spot added at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}) reason=${reason}`);
+        if (this.data.badSpots.length > MAX_BAD_SPOTS) {
+            this.data.badSpots = this.data.badSpots.slice(-MAX_BAD_SPOTS);
+        }
+        addLog('system', `[MEM] Bad spot added at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}) reason=${reason}`);
         this.scheduleSave();
     }
 
@@ -239,13 +178,20 @@ export class MapMemory {
         );
     }
 
-    isNearBadSpot(pos: Vec3): boolean {
-        return this.data.badSpots.some(s => {
-            // Deaths get a much wider exclusion zone
-            const isDeathSpot = this.data.deaths?.some(
-                d => d.x === s.x && d.y === s.y && d.z === s.z
+    private getDeathKeys(): Set<string> {
+        if (!this._deathKeys) {
+            this._deathKeys = new Set(
+                (this.data.deaths ?? []).map(d => `${d.x},${d.y},${d.z}`)
             );
-            const radius = isDeathSpot ? DEATH_BAD_SPOT_RADIUS : BAD_SPOT_RADIUS;
+        }
+        return this._deathKeys;
+    }
+
+    isNearBadSpot(pos: Vec3): boolean {
+        const deathKeys = this.getDeathKeys();
+        return this.data.badSpots.some(s => {
+            const isDeath = deathKeys.has(`${s.x},${s.y},${s.z}`);
+            const radius = isDeath ? DEATH_BAD_SPOT_RADIUS : BAD_SPOT_RADIUS;
             return (
                 Math.abs(s.x - pos.x) < radius &&
                 Math.abs(s.y - pos.y) < radius &&
@@ -277,14 +223,15 @@ export class MapMemory {
                     if (!block) continue;
 
                     const key = `${bx},${by},${bz}`;
-                    const existing = this.data.blockObservations.find(
-                        o => o.x === bx && o.y === by && o.z === bz
-                    );
+                    const idx = this._blockObsIndex?.get(key);
+                    const existing = idx !== undefined ? this.data.blockObservations[idx] : undefined;
 
                     if (!existing) {
-                        this.data.blockObservations.push({ x: bx, y: by, z: bz, name: block.name, lastSeen: now });
+                        const newObs: BlockObservation = { x: bx, y: by, z: bz, name: block.name, lastSeen: now };
+                        this.data.blockObservations.push(newObs);
+                        this._blockObsIndex?.set(key, this.data.blockObservations.length - 1);
                     } else if (existing.name !== block.name) {
-                        console.log(`[MapMemory] Block changed at (${bx},${by},${bz}): ${existing.name} → ${block.name}`);
+                        addLog('system', `[MEM] Block changed at (${bx},${by},${bz}): ${existing.name} → ${block.name}`);
                         existing.name = block.name;
                         existing.lastSeen = now;
                         changes++;
@@ -300,11 +247,14 @@ export class MapMemory {
             }
         }
 
-        // Cap observation list size to avoid unbounded growth
+        // Cap observation list size to avoid unbounded growth.
         if (this.data.blockObservations.length > 50000) {
-            // Drop oldest observations
-            this.data.blockObservations.sort((a, b) => b.lastSeen - a.lastSeen);
-            this.data.blockObservations = this.data.blockObservations.slice(0, 40000);
+            const cutoff = now - 600_000;
+            this.data.blockObservations = this.data.blockObservations.filter(o => o.lastSeen > cutoff);
+            if (this.data.blockObservations.length > 45000) {
+                this.data.blockObservations.length = 45000;
+            }
+            this.rebuildBlockIndex();
         }
 
         if (changes > 0) this.scheduleSave();
