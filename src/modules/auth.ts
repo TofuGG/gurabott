@@ -19,7 +19,7 @@
  */
 
 import type { Bot } from 'mineflayer';
-import { addLog } from './tui.ts';
+import { addLog } from '../core/store.ts';
 import { sleep } from '../utils.ts';
 
 export interface GuiAuthConfig {

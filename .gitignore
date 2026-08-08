@@ -13,6 +13,10 @@ dist/
 *.js
 !index.js
 
+# Portable Node 26 runtime (OpenTUI requires node:ffi / Node >= 26)
+node-runtime/
+!node-runtime/download.ps1
+
 # Logs
 *.log
 npm-debug.log*
@@ -49,3 +53,17 @@ tmp/
 tsc_errors.txt
 data/
 project_archive.zip
+
+# Dev-only harnesses (spikes, live tests, RCON tool)
+src/spike-*.ts
+src/spike-*.tsx
+src/test-drive.ts
+src/test-session.ts
+src/test-mcp.ts
+src/rcon-cli.mjs
+
+# Stray accidental directory (recursive copy of a user home folder)
+Users/
+
+# Repo-local agent instructions (kept locally, not committed)
+AGENTS.md

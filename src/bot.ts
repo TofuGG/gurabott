@@ -5,44 +5,30 @@
 
 import Mineflayer from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
-import minecraftData from 'minecraft-data';
-import { Vec3 } from 'vec3';
 import Groq from 'groq-sdk';
 
-import { sleep, getRandom, parseChatMessage } from './utils.ts';
+import { getRandom, parseChatMessage } from './utils.ts';
 
-import { BotState, attachBot, getState, setState, clearAllControls } from './modules/state.ts';
-import { addLog, attachBotToTUI, setConnected } from './modules/tui.ts';
+import { BotState, attachBot, getState, setState } from './modules/state.ts';
+import { addLog, pushTelemetry } from './core/store.ts';
 import { getAIResponse, clearHistory, type AIContext } from './modules/ai.ts';
 import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
 import { startStuckDetector } from './stuckDetector.ts';
-import { startMovementAI } from './movementAI.ts';
+import { startMovementAI, resetMovementSuppression } from './movementAI.ts';
+import { BotSession } from './session.ts';
 import { setBotHealthStatus } from './web.ts';
-import { fileURLToPath } from 'url';
-import path from 'path';
-import fs from 'fs';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const baritoneGoals = baritonePlugin.goals;
+import { startMcpServer, stopMcpServer } from './modules/mcp.ts';
+import { createCombatController, type CombatController } from './modules/combat.ts';
+import { startWaterSurvival } from './modules/water.ts';
+import { HOSTILE_MOBS } from './constants.ts';
+import { loadJson } from './config.ts';
 
 // BUG-1 FIX: Lazy-load JSON config files so they are read at createBot()
 // time (after the interactive setup has guaranteed they exist on disk)
 // rather than at module-graph resolution time (which crashes with
 // ERR_MODULE_NOT_FOUND on a fresh clone).
-function loadJson<T>(relativePath: string): T {
-    const p = path.join(__dirname, '..', relativePath);
-    try {
-        const raw = fs.readFileSync(p, 'utf-8');
-        addLog('system', `[BOT] Loaded ${relativePath}`);
-        return JSON.parse(raw) as T;
-    } catch (err: any) {
-        addLog('error', `[BOT] Failed to load ${relativePath}: ${err?.message ?? err}`);
-        throw new Error(`Cannot load ${relativePath}: ${err?.message ?? err}`);
-    }
-}
 
 let CONFIG: any;
 let PERSONALITY: any;
@@ -56,20 +42,41 @@ let bot: Mineflayer.Bot;
 let lastPlayerJoined: string | null = null;
 let currentConfig: { ip: string; port: number; username: string } | null = null;
 const intervals: NodeJS.Timeout[] = [];
+let session: BotSession | null = null;
+let deathRespawnAttempts = 0;
 let isEscapingStuck = false;
 let lastChimeTime = 0;
 let lastHurtMessageTime = 0;
 let aiDispatchLock = false;
 let spawned = false;
+let isConnected = false;
+
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+// Push a typed snapshot into the core store so any UI layer renders live
+// status without touching the bot object. Emitted on connection events and on
+// a 1s cadence while a session is alive.
+
+function pushBotTelemetry(): void {
+    const b = bot;
+    pushTelemetry({
+        connected: isConnected && !!b?.entity,
+        server: currentConfig ? `${currentConfig.ip}:${currentConfig.port}` : '',
+        username: b?.username ?? '',
+        ping: b?.player?.ping ?? -1,
+        players: b ? Object.keys(b.players ?? {}).length : 0,
+        hp: b?.health ?? 0,
+        food: b?.food ?? 0,
+        pos: b?.entity?.position
+            ? { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z }
+            : null,
+        state: getState(),
+        invCount: b?.inventory?.items?.()?.length ?? 0,
+        aiEnabled: AI_ENABLED,
+        uptime: process.uptime(),
+    });
+}
 
 const collecting = { active: false, summary: {} as Record<string, number> };
-
-const HOSTILE_MOBS = new Set([
-    'zombie', 'creeper', 'skeleton', 'spider', 'enderman', 'witch', 'slime', 'drowned', 'husk', 'stray',
-    'phantom', 'pillager', 'vindicator', 'evoker', 'ravager', 'illusioner', 'blaze', 'magma_cube', 'ghast',
-    'wither_skeleton', 'piglin', 'piglin_brute', 'zombified_piglin', 'hoglin', 'zoglin', 'warden', 'shulker',
-    'silverfish', 'endermite', 'guardian', 'elder_guardian', 'vex',
-]);
 
 // ── Pathfinder Config ─────────────────────────────────────────────────────────
 
@@ -101,6 +108,7 @@ function buildCommandCtx(): CommandContext {
         personality: PERSONALITY,
         configureBaritone,
         intervals,
+        session: session as BotSession,
         collecting,
         lastPlayerJoined: () => lastPlayerJoined,
         HOSTILE_MOBS,
@@ -205,6 +213,13 @@ async function handleAIResponse(
 const disconnect = (): void => {
     addLog('system', '[BOT] Disconnecting — cleaning up intervals and listeners');
     setDisconnecting(true);
+    // Kill the session first: this clears every session-tracked timer
+    // (movementAI schedule, survival restart) and flips session.alive so any
+    // in-flight async loop sees the connection is gone and stops itself.
+    session?.end();
+    // MCP server must not outlive the bot it exposes — stop it so the port is
+    // freed and a fresh server starts on reconnect (mirrors session cleanup).
+    void stopMcpServer();
     // Snapshot intervals before clearing — iterate the copy so concurrent
     // pushes to the original array don't cause missed cleanup.
     const snapshot = [...intervals];
@@ -213,6 +228,11 @@ const disconnect = (): void => {
     try { bot?.removeAllListeners(); } catch {}
     try { bot?.ashfinder?.removeAllListeners?.(); } catch {}
     try { bot?.quit(); } catch {}
+    // Release the module-level bot/session refs so getBotCommandCtx() returns
+    // null until the replacement bot exists. Commands issued during the
+    // reconnect delay must not act on the corpse of the old connection.
+    session = null;
+    bot = null as any;
     setDisconnecting(false);
     addLog('system', '[BOT] Disconnect cleanup complete');
 };
@@ -221,7 +241,6 @@ const disconnect = (): void => {
 
 export function createBot(
     config: { ip: string; port: number; username: string },
-    mineflayerViewer?: any,
 ): void {
     // BUG-1 FIX: Load config files lazily (after interactive setup guarantees they exist)
     CONFIG = loadJson('config.json');
@@ -240,6 +259,17 @@ export function createBot(
         maxHistoryPerPlayer: PERSONALITY.aiSettings?.conversionHistoryPerPlayer ?? 20,
     } : null;
 
+    // MCP server — hosts an MCP endpoint so ANY AI (opencode, Claude, Cursor,
+    // ...) can observe and control the bot, independent of the Groq AI mode.
+    const mcpConfig = (CONFIG as any).mcp ?? {};
+    if (mcpConfig.enabled !== false) {
+        void startMcpServer({
+            getCtx: () => getBotCommandCtx(),
+            host: process.env.MCP_HOST || mcpConfig.host || '127.0.0.1',
+            port: parseInt(process.env.MCP_PORT || mcpConfig.port || '5400', 10),
+        });
+    }
+
     // Reset module-level state for clean reconnect
     isEscapingStuck = false;
     lastChimeTime = 0;
@@ -248,6 +278,13 @@ export function createBot(
     spawned = false;
     collecting.active = false;
     collecting.summary = {};
+
+    // Fresh session for this connection — the previous session's timers were
+    // cleared by disconnect(). resetMovementSuppression() also clears any
+    // suppression flag left over from a command that was interrupted by the
+    // previous disconnect (otherwise the new bot would never move again).
+    session = new BotSession();
+    resetMovementSuppression();
 
     addLog('system', `[BOT] createBot — AI: ${AI_ENABLED ? 'ON' : 'OFF'}, Host: ${config.ip}:${config.port}`);
 
@@ -258,7 +295,7 @@ export function createBot(
         delayMs: CONFIG.action.retryDelay,
         onReconnect: () => {
             disconnect();
-            if (currentConfig) createBot(currentConfig, mineflayerViewer);
+            if (currentConfig) createBot(currentConfig);
         },
         onGiveUp: () => {
             addLog('error', 'Reconnect failed. Please restart the bot.');
@@ -274,8 +311,11 @@ export function createBot(
 
     bot.loadPlugin(baritonePlugin.loader);
     attachBot(bot);
-    attachBotToTUI(bot);
-    // Input is now handled exclusively by the TUI (blessed). No readline here.
+    // Telemetry producer — live status for any connected UI. Runs for the
+    // whole connection lifetime; disconnect() clears it with the other
+    // intervals.
+    intervals.push(setInterval(pushBotTelemetry, 1000));
+    // Input is now handled exclusively by the TUI. No readline here.
 
     const authConfig = (CONFIG as any).auth ?? {
         enabled: false,
@@ -294,17 +334,47 @@ export function createBot(
 
     bot.on('end', (reason) => {
         addLog('warn', `[BOT] Connection ended: ${reason}`);
-        setConnected(false);
+        isConnected = false;
+        // Kill the session IMMEDIATELY, not at reconnect time: the connection
+        // is gone, so movementAI/survival must not keep scheduling against the
+        // dead bot during the reconnect delay (would be a zombie loop).
+        // disconnect() calls session.end() again — it's idempotent.
+        session?.end();
+        pushBotTelemetry();
         setBotHealthStatus(false, 'disconnected');
         triggerReconnect();
     });
 
     bot.on('kicked', (reason, loggedIn) => {
         addLog('error', `Kicked: ${reason} (loggedIn=${loggedIn})`);
+        isConnected = false;
+        pushBotTelemetry();
+
+        // Kicks caused by bans, rate-limits or failed auth should NOT trigger
+        // the reconnect loop — reconnecting would just hammer the server and
+        // risk an IP ban. 'end' always follows 'kicked', so gate the loop now.
+        const reasonStr = String(reason ?? '').toLowerCase();
+        const permanentKick = ['ban', 'banned', 'rate limit', 'too fast', 'auth', 'login', 'register', 'password', 'invalid'].some(k => reasonStr.includes(k));
+
+        // config.autoReconnect (default true) is the master switch for the
+        // whole reconnect loop.
+        const autoReconnect = (CONFIG as any).autoReconnect !== false;
+
+        if (permanentKick) {
+            addLog('error', '[BOT] Permanent kick (ban/rate-limit/auth) — stopping reconnect loop');
+            setDisconnecting(true);
+        } else if (!autoReconnect) {
+            addLog('warn', '[BOT] autoReconnect disabled — stopping reconnect loop');
+            setDisconnecting(true);
+        } else {
+            addLog('warn', '[BOT] Transient kick — reconnect will be attempted via end handler');
+        }
     });
 
     bot.once('login', () => {
         bot.setMaxListeners(40);
+        isConnected = true;
+        pushBotTelemetry();
         addLog('system', `[BOT] Connected to ${config.ip}:${config.port} as ${config.username}`);
         if (AI_ENABLED) {
             const loginMsg = (PERSONALITY as any).messages?.login;
@@ -336,10 +406,53 @@ export function createBot(
         }
     });
 
+    // ── Death & respawn ────────────────────────────────────────────────────
+    // mineflayer only fires 'death'; we must call bot.respawn() ourselves or
+    // the bot sits on the death screen forever. Retry with backoff in case the
+    // death-screen packet arrives slightly after the event.
+    bot.on('death', () => {
+        if (!session?.alive) return;
+        addLog('error', `[BOT] ☠ Died (health ${bot.health ?? 0}) — respawning...`);
+        setBotHealthStatus(true, 'dead');
+        isConnected = true;
+        pushBotTelemetry();
+        // Abort anything that was fighting: tasks must not keep issuing
+        // movement/dig on the corpse, and wander must not run while dead.
+        if (session) session.moveActive = false;
+        setState(BotState.IDLE);
+        try { combat?.stopCombat(); } catch {}
+        try { bot.ashfinder.stop(); } catch {}
+        respawnBot();
+    });
+
+    // Reset the respawn retry counter whenever we (re)enter the world. Also
+    // a safe place to re-assert state if it was left non-IDLE by a death.
+    bot.on('spawn', () => {
+        deathRespawnAttempts = 0;
+    });
+
+    async function respawnBot(): Promise<void> {
+        if (!session?.alive) return;
+        if (deathRespawnAttempts >= 10) {
+            addLog('error', '[BOT] Respawn failed 10× — giving up');
+            return;
+        }
+        deathRespawnAttempts++;
+        try {
+            await bot.respawn();
+            deathRespawnAttempts = 0;
+            addLog('system', '[BOT] Respawned');
+        } catch (err: any) {
+            addLog('warn', `[BOT] Respawn attempt ${deathRespawnAttempts}/10 failed — retrying in 3s`);
+            setTimeout(() => { respawnBot().catch(() => {}); }, 3000);
+        }
+    }
+
     bot.on('message', async (jsonMsg: any) => {
         const parsed = parseChatMessage(jsonMsg, bot.username);
         if (!parsed) return;
         const { username, message } = parsed;
+        addLog('chat', `[CHAT] <${username}> ${message}`);
 
         if (!bot || !bot.entity || (bot.health ?? 0) <= 0) return;
 
@@ -397,103 +510,33 @@ export function createBot(
 
     // ── Spawn ────────────────────────────────────────────────────────────────
 
-    const onlineBeforeSpawn = new Set<string>();
-
     bot.once('spawn', async () => {
         resetReconnectAttempts();
         if (!bot?.entity) return;
 
+        isConnected = true;
+        pushBotTelemetry();
         addLog('system', `[BOT] Spawned — version: ${bot.version}, AI: ${AI_ENABLED ? 'ON' : 'OFF'}`);
         addLog('system', `[BOT] Initializing modules...`);
         setBotHealthStatus(true, 'spawning');
 
-        if (mineflayerViewer) {
-            try {
-                mineflayerViewer(bot, { port: 3007, firstPerson: false });
-                addLog('system', '[BOT] Viewer running on http://localhost:3007');
-            } catch (err: any) {
-                addLog('warn', `[BOT] Could not start viewer: ${err?.message}`);
-            }
-        }
-
         configureBaritone();
         addLog('system', '[BOT] Baritone configured');
-        startStuckDetector(bot, (v) => { isEscapingStuck = v; });
+        startStuckDetector(bot, (v) => { isEscapingStuck = v; }, session!);
         addLog('system', '[BOT] Stuck detector started');
 
-        for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
-        await sleep(1000);
-        for (const name of Object.keys(bot.players)) onlineBeforeSpawn.add(name);
-
         // ── Water survival intervals ─────────────────────────────────────────
+        startWaterSurvival({
+            bot,
+            intervals,
+            waterHelpMessages: (PERSONALITY as any).messages?.waterHelp ?? [],
+        });
 
-        intervals.push(setInterval(() => {
-            if (!bot?.entity) return;
-            const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-            if (headBlock?.name?.includes('water')) {
-                const msgs = (PERSONALITY as any).messages?.waterHelp ?? [];
-                if (msgs.length > 0) bot.chat(getRandom(msgs));
-            }
-        }, 3000));
-
-        let waterEscaping = false;
-        intervals.push(setInterval(async () => {
-            try {
-                if (!bot?.entity?.position || getState() !== BotState.IDLE || waterEscaping) return;
-                const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-                const feetBlock = bot.blockAt(bot.entity.position.offset(0, 0, 0));
-                const isInWater = headBlock?.name?.includes('water') || feetBlock?.name?.includes('water');
-                if (!isInWater) {
-                    bot.setControlState('jump', false);
-                    bot.setControlState('forward', false);
-                    return;
-                }
-
-                const botY = Math.floor(bot.entity.position.y);
-                const shore = bot.findBlock({
-                    matching: (block) => !!(
-                        block?.name &&
-                        !block.name.includes('water') &&
-                        block.boundingBox === 'block' &&
-                        block.position?.y >= botY
-                    ),
-                    maxDistance: 20,
-                });
-
-                if (shore) {
-                    await bot.lookAt(shore.position.offset(0.5, 1, 0.5));
-                    bot.setControlState('jump', true);
-                    bot.setControlState('forward', true);
-                } else {
-                    waterEscaping = true;
-                    bot.setControlState('jump', false);
-                    bot.setControlState('forward', false);
-                    try {
-                        const dryLand = bot.findBlock({
-                            matching: (block) => !!(block?.name && !block.name.includes('water') && block.boundingBox === 'block'),
-                            maxDistance: 32,
-                        });
-                        if (dryLand) {
-                            try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dryLand.position.x, dryLand.position.y + 1, dryLand.position.z))); } catch {}
-                        }
-                    } catch {
-                        bot.setControlState('jump', true);
-                    } finally {
-                        waterEscaping = false;
-                    }
-                }
-            } catch (err: any) {
-                addLog('error', `[BOT] Water escape interval error: ${err?.message ?? err}`);
-            }
-        }, 1000));
-
-        startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, intervals, () => isEscapingStuck);
+        startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, session!, () => isEscapingStuck);
         addLog('system', '[BOT] Movement AI started');
         addLog('system', '[BOT] All modules initialized');
         setBotHealthStatus(true, 'idle');
 
-        // BUG-4 FIX: Clean up the temporary set — no longer needed after spawn
-        onlineBeforeSpawn.clear();
         spawned = true;
     });
 
@@ -521,175 +564,16 @@ export function createBot(
     });
 
     // ── Combat / flee behavior ────────────────────────────────────────────────
-    // Fight if ≤3 hostile mobs nearby; flee if overwhelmed or low HP.
+    // Fight if ≤3 hostile mobs nearby; flee if overwhelmed or low HP. The
+    // controller owns the fight/flee state machine and the hostile scanners.
+    let combat: CombatController | null = null;
 
-    let combatActive    = false;
-    let combatTimer: NodeJS.Timeout | null = null;
-
-    function isHostileEntity(e: any): boolean {
-        if (!e?.position || !e.name) return false;
-        // mineflayer reports baby zombies and chicken jockeys as type 'mob' with name 'zombie'
-        // Some versions report jockey riders with type 'mob' or no type — check both
-        const name = e.name.toLowerCase();
-        const validType = e.type === 'mob' || e.type === 'hostile' || !e.type;
-        return validType && HOSTILE_MOBS.has(name);
+    function startCombatMonitoring(): void {
+        combat = createCombatController({ bot, session: session as BotSession, intervals, configureBaritone });
+        combat.startHostileMonitoring();
     }
 
-    function countNearbyHostiles(): number {
-        return Object.values(bot.entities as Record<string, any>).filter(e =>
-            isHostileEntity(e) &&
-            e.position?.distanceTo(bot.entity.position) < 10
-        ).length;
-    }
-
-    function getNearestHostile(): any {
-        let nearest: any = null;
-        let minDist = Infinity;
-        for (const e of Object.values(bot.entities as Record<string, any>)) {
-            if (!isHostileEntity(e)) continue;
-            const d = e.position?.distanceTo(bot.entity.position) ?? Infinity;
-            if (d < minDist) { minDist = d; nearest = e; }
-        }
-        return nearest;
-    }
-
-    function stopCombat() {
-        if (combatTimer) {
-            clearInterval(combatTimer);
-            const idx = intervals.indexOf(combatTimer);
-            if (idx !== -1) intervals.splice(idx, 1);
-            combatTimer = null;
-        }
-        combatActive = false;
-        if (getState() === BotState.ATTACKING || getState() === BotState.FLEEING) {
-            setState(BotState.IDLE);
-        }
-    }
-
-    function startCombat(target: any) {
-        if (combatActive) return;
-        combatActive = true;
-        setState(BotState.ATTACKING);
-        addLog('system', `[BOT] ⚔ Fighting ${target.name} at distance ${Math.round(target.position?.distanceTo(bot.entity.position) ?? 0)}`);
-
-        // Equip best weapon
-        const weaponPriority = [
-            'netherite_sword','diamond_sword','iron_sword','stone_sword','golden_sword','wooden_sword',
-            'netherite_axe',  'diamond_axe',  'iron_axe',  'stone_axe',  'golden_axe',  'wooden_axe',
-        ];
-        for (const w of weaponPriority) {
-            const item = bot.inventory.items().find(i => i.name === w);
-            if (item) { bot.equip(item, 'hand').catch(() => {}); break; }
-        }
-
-        configureBaritone();
-        bot.ashfinder.followEntity(target, { distance: 1 }).catch(() => {});
-
-        combatTimer = setInterval(() => {
-            const hp = bot.health ?? 20;
-
-            // Flee if HP critical or mob count overwhelming
-            if (hp <= 5 || countNearbyHostiles() > 5) {
-                stopCombat();
-                doFlee(target);
-                return;
-            }
-
-            // Target dead or gone
-            const still = bot.entities[target.id];
-            if (!still || still.position?.distanceTo(bot.entity.position) > 20) {
-                // Check for other nearby mobs to chain-fight
-                const next = getNearestHostile();
-                if (next && next.position?.distanceTo(bot.entity.position) < 10) {
-                    stopCombat();
-                    startCombat(next);
-                } else {
-                    stopCombat();
-                }
-                return;
-            }
-
-            // Attack if in range
-            if (still.position?.distanceTo(bot.entity.position) < 4) {
-                try { bot.attack(still); } catch {}
-            }
-        }, 500);
-
-        intervals.push(combatTimer);
-    }
-
-    function doFlee(threat: any) {
-        if (getState() === BotState.FLEEING) return;
-        setState(BotState.FLEEING);
-        addLog('system', `[BOT] 🏃 Fleeing from ${threat.name} (HP: ${Math.round(bot.health ?? 20)})`);
-
-        configureBaritone({ allowSprinting: true });
-
-        // Keep recalculating flee destination every 800ms so bot never stops
-        function updateFleeGoal() {
-            if (getState() !== BotState.FLEEING || !bot?.entity) return;
-            const botPos    = bot.entity.position;
-            const threatPos = threat.position ?? botPos;
-            const dx  = botPos.x - threatPos.x;
-            const dz  = botPos.z - threatPos.z;
-            const len = Math.sqrt(dx*dx + dz*dz) || 1;
-            const runX = botPos.x + (dx/len) * 16;
-            const runZ = botPos.z + (dz/len) * 16;
-            try {
-                if (!bot.ashfinder.isPathing) {
-                    bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(Math.round(runX), Math.round(botPos.y), Math.round(runZ)))).catch(() => {});
-                }
-            } catch {}
-        }
-
-        updateFleeGoal();
-        const fleeInterval = setInterval(updateFleeGoal, 800);
-        intervals.push(fleeInterval as any);
-
-        // Stop fleeing after 6s or when threat is gone
-        const fleeStopTimer = setTimeout(() => {
-            clearInterval(fleeInterval);
-            if (getState() === BotState.FLEEING) {
-                bot.ashfinder.stop();
-                setState(BotState.IDLE);
-            }
-        }, 6000);
-        intervals.push(fleeStopTimer as any);
-    }
-
-    // Trigger combat/flee whenever a mob moves into range
-    bot.on('entityMoved', (entity: any) => {
-        if (!bot?.entity) return;
-        if (!isHostileEntity(entity)) return;
-        if (combatActive) return;
-        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
-        if ((bot.health ?? 20) <= 0) return;
-
-        const dist = bot.entity.position.distanceTo(entity.position);
-        if (dist >= 8) return;
-
-        const mobCount = countNearbyHostiles();
-        if (mobCount <= 3) {
-            startCombat(entity);
-        } else if (mobCount > 3) {
-            doFlee(entity);
-        }
-    });
-
-    // Also scan for mobs every 2s even if they haven't moved (handles spawns)
-    const hostileScanInterval = setInterval(() => {
-        if (!bot?.entity || combatActive) return;
-        if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
-        const nearest = getNearestHostile();
-        if (!nearest) return;
-        const dist = nearest.position?.distanceTo(bot.entity.position) ?? Infinity;
-        if (dist < 8) {
-            const mobCount = countNearbyHostiles();
-            if (mobCount <= 3) startCombat(nearest);
-            else doFlee(nearest);
-        }
-    }, 2000);
-    intervals.push(hostileScanInterval as any);
+    startCombatMonitoring();
 }
 
 /** Returns the current command context (or null if bot not yet created) */

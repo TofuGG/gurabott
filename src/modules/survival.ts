@@ -18,9 +18,12 @@ import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import minecraftData from 'minecraft-data';
-import { addLog } from './tui.ts';
+import { addLog } from '../core/store.ts';
 import { BotState, getState, setState } from './state.ts';
-import { sleep } from '../utils.ts';
+import { BotSession } from '../session.ts';
+import { sleep, safeGoto, withTimeout } from '../utils.ts';
+import { equipBestTool, waitForPickup } from './mining.ts';
+import { LOG_LOGS, PLANKS, STONE, COBBLE, IRON_ORE, DIAMOND } from '../constants.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -30,9 +33,20 @@ let running  = false;
 let stopFlag = false;
 let lastStart = 0;
 
+// Session owning the current run. Set on startSurv(). Every long-running loop
+// checks sessionAlive() so a disconnect aborts the run instead of leaving a
+// zombie loop mining/digging against a dead bot.
+let sessionRef: BotSession | null = null;
+
+function sessionAlive(): boolean {
+    return sessionRef ? sessionRef.alive : true;
+}
+
 export function isSurvRunning() { return running; }
 
-export function startSurv(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void): void {
+export function startSurv(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void, session?: BotSession): void {
+    if (session) sessionRef = session;
+    if (!sessionAlive()) { log('Connection closed — survival not starting.'); return; }
     if (running) { log('Already running. Use "gsurv stop" to stop.'); return; }
     // Guard against rapid restart (e.g. loop-end timer + manual gsurv)
     const now = Date.now();
@@ -63,11 +77,12 @@ function logErr(msg: string) { addLog('error',   `[SURV] ${msg}`); }
 
 /** Log + check stop flag. Returns false if we should stop. */
 async function step(msg: string): Promise<boolean> {
-    if (stopFlag) {
+    if (stopFlag || !sessionAlive()) {
+        const wasStopped = stopFlag;
         running  = false;
         stopFlag = false;
         setState(BotState.IDLE);
-        log('⏹ Stopped.');
+        log(wasStopped ? '⏹ Stopped.' : 'Connection lost — survival stopped.');
         return false;
     }
     log(msg);
@@ -86,10 +101,6 @@ function has(bot: Bot, ...names: string[]): boolean {
     return bot.inventory.items().some(i => names.includes(i.name));
 }
 
-function hasAny(bot: Bot, prefixes: string[]): boolean {
-    return bot.inventory.items().some(i => prefixes.some(p => i.name.startsWith(p) || i.name === p));
-}
-
 function invSummary(bot: Bot): string {
     const items = bot.inventory.items();
     if (!items.length) return 'empty';
@@ -99,10 +110,19 @@ function invSummary(bot: Bot): string {
 // ── Movement helpers ──────────────────────────────────────────────────────────
 
 async function goTo(bot: Bot, block: any, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
+    if (!sessionAlive()) return false;
     try {
         log(`  📍 Navigating to ${block.name ?? 'block'} at ${block.position.floored()}`);
         configureBaritone({ breakBlocks: true, placeBlocks: true });
-        await bot.ashfinder.goto(new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2));
+        const nav = await safeGoto(
+            bot,
+            new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2),
+            12000,
+        );
+        // baritone's goto() NEVER rejects — it resolves with a status. A failed
+        // path (unreachable ledge, water gap) must be treated as an error or we
+        // keep going and hang in the next dig().
+        if (nav.status === 'failed') throw new Error(`navigation failed: ${nav.error?.message ?? nav.error ?? ''}`);
         log(`  ✓ Reached destination`);
         return true;
     } catch (e: any) {
@@ -118,9 +138,12 @@ async function goTo(bot: Bot, block: any, configureBaritone: (overrides?: Record
 async function mine(bot: Bot, blockNames: string[], needed: number, configureBaritone: (overrides?: Record<string, any>) => void, searchRadius = 64): Promise<number> {
     let mined = 0;
     let failures = 0;
+    let navFails = 0;
     const MAX_FAILURES = 10;
+    const MAX_NAV_FAILURES = 3;
+    if (!sessionAlive()) return 0;
     log(`  ⛏ Looking for ${blockNames[0]} (need ${needed}, radius ${searchRadius})...`);
-    while (mined < needed && !stopFlag) {
+    while (mined < needed && !stopFlag && sessionAlive()) {
         const block = bot.findBlock({
             matching: b => blockNames.includes(b.name),
             maxDistance: searchRadius,
@@ -132,7 +155,16 @@ async function mine(bot: Bot, blockNames: string[], needed: number, configureBar
         log(`  ⛏ Found ${block.name} at ${block.position.floored()}, going there...`);
         const blockPos = block.position.clone();
         const reached = await goTo(bot, block, configureBaritone);
-        if (!reached) { await sleep(500); continue; }
+        if (!reached) {
+            navFails++;
+            if (navFails >= MAX_NAV_FAILURES) {
+                logWarn(`  Too many navigation failures (${navFails}) — giving up on this resource`);
+                break;
+            }
+            await sleep(500);
+            continue;
+        }
+        navFails = 0;
         // Re-fetch block after navigation — the original reference may be stale
         const freshBlock = bot.blockAt(blockPos);
         if (!freshBlock || freshBlock.name !== block.name) { logWarn('  Block changed during navigation'); continue; }
@@ -140,7 +172,7 @@ async function mine(bot: Bot, blockNames: string[], needed: number, configureBar
         const countBefore = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
 
         try {
-            await bot.dig(freshBlock);
+            await withTimeout(bot.dig(freshBlock), 12000);
         } catch (e: any) {
             logWarn(`  Dig failed: ${e?.message ?? e}`);
             failures++;
@@ -153,18 +185,7 @@ async function mine(bot: Bot, blockNames: string[], needed: number, configureBar
         }
 
         // Wait up to 5s for item to enter inventory
-        await new Promise<void>(resolve => {
-            let done = false;
-            const check = () => {
-                if (done) return;
-                const countNow = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
-                if (countNow > countBefore) { done = true; cleanup(); resolve(); }
-            };
-            const cleanup = () => { done = true; bot.removeListener('playerCollect', check); bot.removeListener('physicsTick', check); };
-            bot.on('playerCollect', check);
-            bot.on('physicsTick', check);
-            setTimeout(() => { cleanup(); resolve(); }, 5000);
-        });
+        await waitForPickup(bot, blockNames);
 
         const countAfter = bot.inventory.items().filter(i => blockNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
         if (countAfter > countBefore) {
@@ -182,6 +203,7 @@ async function mine(bot: Bot, blockNames: string[], needed: number, configureBar
 // ── Crafting ──────────────────────────────────────────────────────────────────
 
 async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, configureBaritone?: (overrides?: Record<string, any>) => void): Promise<boolean> {
+    if (!sessionAlive()) return false;
     const mcData = minecraftData(bot.version);
     const itemDef = mcData.itemsByName[itemName];
     if (!itemDef) { logWarn(`  Unknown item: ${itemName}`); return false; }
@@ -210,6 +232,7 @@ async function craft(bot: Bot, itemName: string, amount = 1, needTable = false, 
 // ── Place block ───────────────────────────────────────────────────────────────
 
 async function placeNearby(bot: Bot, itemName: string, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
+    if (!sessionAlive()) return false;
     const item = bot.inventory.items().find(i => i.name === itemName);
     if (!item) { logWarn(`  Don't have ${itemName} to place`); return false; }
 
@@ -248,6 +271,7 @@ const FUEL_BURN_TICKS: Record<string, number> = {
 };
 
 async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: string, amount: number, configureBaritone: (overrides?: Record<string, any>) => void): Promise<boolean> {
+    if (!sessionAlive()) return false;
     log(`  🔥 Smelting ${amount}× ${inputName} → ${outputName}`);
 
     let furnaceBlock = bot.findBlock({ matching: b => b.name === 'furnace', maxDistance: 32 });
@@ -289,9 +313,9 @@ async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: 
         // M10: Timeout scales with amount and fuel type
         const deadline = Date.now() + Math.max(120_000, toSmelt * 12_000 + 30_000);
         let got = 0;
-        while (got < toSmelt && Date.now() < deadline) {
+        while (got < toSmelt && Date.now() < deadline && sessionAlive()) {
             await sleep(3000);
-            if (stopFlag) { try { furnace.close(); } catch {} return false; }
+            if (stopFlag || !sessionAlive()) { try { furnace.close(); } catch {} return false; }
             try {
                 const out = furnace.outputItem();
                 if (out) {
@@ -319,28 +343,12 @@ async function smelt(bot: Bot, inputName: string, fuelName: string, outputName: 
     }
 }
 
-// ── Equip best tool ───────────────────────────────────────────────────────────
-
-async function equipBest(bot: Bot, toolType: 'pickaxe' | 'axe' | 'sword'): Promise<void> {
-    const tiers = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
-    for (const tier of tiers) {
-        const item = bot.inventory.items().find(i => i.name === `${tier}_${toolType}`);
-        if (item) { try { await bot.equip(item, 'hand'); } catch {} return; }
-    }
-}
-
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
 async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void): Promise<void> {
     setState(BotState.COLLECTING);
 
-    const LOG_LOGS = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
-    const PLANKS   = ['oak_planks','birch_planks','spruce_planks','jungle_planks','acacia_planks','dark_oak_planks','mangrove_planks','cherry_planks'];
-    const STONE    = ['stone','cobblestone','deepslate','cobbled_deepslate'];
-    const COBBLE   = ['cobblestone','cobbled_deepslate'];
-    const IRON_ORE = ['iron_ore','deepslate_iron_ore'];
-    const DIAMOND  = ['diamond_ore','deepslate_diamond_ore'];
-    const FUELS    = [...LOG_LOGS, ...PLANKS, 'coal', 'charcoal'];
+    const FUELS = [...LOG_LOGS, ...PLANKS, 'coal', 'charcoal'];
 
     // ── Phase 0: Eat / heal ───────────────────────────────────────────────────
     if (!await step('Phase 0 — Health check')) return;
@@ -375,7 +383,7 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
     const logCount = countOf(bot, ...LOG_LOGS);
     log(`  Have ${logCount} logs`);
     if (logCount < 8) {
-        await equipBest(bot, 'axe');
+        await equipBestTool(bot, 'axe');
         const got = await mine(bot, LOG_LOGS, 8 - logCount, configureBaritone, 48);
         log(`  Collected ${got} logs. Total: ${countOf(bot, ...LOG_LOGS)}`);
     }
@@ -419,7 +427,7 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
 
     // ── Phase 3: Stone ────────────────────────────────────────────────────────
     if (!await step('Phase 3 — Stone tools')) return;
-    await equipBest(bot, 'pickaxe');
+    await equipBestTool(bot, 'pickaxe');
     log(`  Equipped best pickaxe`);
 
     const cobbleCount = countOf(bot, ...COBBLE);
@@ -438,7 +446,7 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
 
     // ── Phase 4: Iron ─────────────────────────────────────────────────────────
     if (!await step('Phase 4 — Iron tools')) return;
-    await equipBest(bot, 'pickaxe');
+    await equipBestTool(bot, 'pickaxe');
 
     const rawIron   = countOf(bot, 'raw_iron');
     const ironIngot = countOf(bot, 'iron_ingot');
@@ -478,7 +486,7 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
 
     // ── Phase 5: Diamonds ─────────────────────────────────────────────────────
     if (!await step('Phase 5 — Diamonds (Y -58 to -64)')) return;
-    await equipBest(bot, 'pickaxe');
+    await equipBestTool(bot, 'pickaxe');
     log(`  Current Y: ${Math.round(bot.entity.position.y)}`);
 
     const diamonds = countOf(bot, 'diamond');
@@ -497,6 +505,7 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
     // ── Loop complete ─────────────────────────────────────────────────────────
     if (!await step('✅ Full progression complete! Restarting loop in 5s...')) return;
     await sleep(5000);
+    if (!sessionAlive()) return;
 
     running = false;
     setState(BotState.IDLE);
@@ -504,6 +513,16 @@ async function runLoop(bot: Bot, configureBaritone: (overrides?: Record<string, 
         stopFlag = false;
         return;
     }
-    // Use setTimeout instead of direct recursion to avoid unbounded stack
-    setTimeout(() => startSurv(bot, configureBaritone), 5000);
+    // Use setTimeout instead of direct recursion to avoid unbounded stack.
+    // Track the timer in the session so a disconnect cancels it, and capture
+    // the session so the restart is skipped if the session that started this
+    // loop has already ended.
+    const restartSession = sessionRef;
+    if (restartSession && restartSession.alive) {
+        const restartTimer = restartSession.track(setTimeout(() => {
+            restartSession.untrack(restartTimer);
+            if (!restartSession.alive) return;
+            startSurv(bot, configureBaritone);
+        }, 5000));
+    }
 }

@@ -3,24 +3,41 @@
 /**
  * Gurabott - Customizable Minecraft AI Bot
  * Entry point for direct execution
- * 
+ *
  * Usage: node index.js
  * For development with hot reload: npm run dev
  * For normal start: npm start
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const tsxPath = require.resolve('tsx/esm');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// The OpenTUI requires node:ffi (--experimental-ffi), which only the bundled
+// node-runtime binary provides — so we resolve it here instead of system node.
+const runtimeDir = fs.readdirSync(path.join(__dirname, 'node-runtime'))
+  .find((d) => d.startsWith('node-v'));
+const nodeBin = path.join(
+  __dirname,
+  'node-runtime',
+  runtimeDir,
+  process.platform === 'win32' ? 'node.exe' : 'bin/node',
+);
+const tsxCli = path.join(__dirname, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const indexPath = path.join(__dirname, 'src', 'index.ts');
 
 console.log('🤖 Starting Gurabott...\n');
 
-const child = spawn('node', ['--loader', 'tsx', indexPath], {
+const child = spawn(nodeBin, [tsxCli, indexPath], {
   cwd: __dirname,
   stdio: 'inherit',
-  shell: process.platform === 'win32'
+  env: {
+    ...process.env,
+    NODE_OPTIONS: '--experimental-ffi --max-old-space-size=400',
+  },
 });
 
 child.on('error', (err) => {
@@ -36,4 +53,3 @@ process.on('SIGINT', () => {
 child.on('exit', (code) => {
   process.exit(code || 0);
 });
-

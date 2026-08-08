@@ -2,7 +2,7 @@
  * connection.ts - Connection lifecycle and reconnect manager
  */
 
-import { addLog } from './tui.ts';
+import { addLog } from '../core/store.ts';
 import { sleep } from '../utils.ts';
 
 export type ReconnectConfig = {
@@ -29,8 +29,6 @@ export function resetReconnectAttempts(): void {
     _reconnecting = false;
 }
 
-export function isReconnecting(): boolean { return _reconnecting; }
-export function isDisconnecting(): boolean { return _disconnecting; }
 export function setDisconnecting(v: boolean): void { _disconnecting = v; }
 
 export async function triggerReconnect(): Promise<void> {

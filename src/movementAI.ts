@@ -5,15 +5,36 @@
 import Mineflayer from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { Vec3 } from 'vec3';
-import { sleep } from './utils.ts';
-import { MapMemory, BehaviorName, BehaviorWeightMap } from './mapMemory.ts';
-import { addLog } from './modules/tui.ts';
+import { sleep, safeGoto } from './utils.ts';
+import { BotSession } from './session.ts';
+import { addLog } from './core/store.ts';
 
 // ── Movement suppression ───────────────────────────────────────────────────────
-let suppressed = false;
+// Ref-counted so overlapping commands (two chat messages handled concurrently,
+// or an AI action chain) can't release suppression while another command is
+// still running. count > 0 means a command owns movement.
+let suppressed = 0;
 
-export function suppressMovement(): void { suppressed = true; }
-export function resumeMovement(): void { suppressed = false; }
+export function suppressMovement(bot?: Mineflayer.Bot): void {
+    if (suppressed === 0) {
+        // First suppress acquires control of movement: cancel any in-flight
+        // baritone path. Without this, the command's own goto()/followEntity()
+        // throws "Already navigating" and silently does nothing, and an active
+        // idle-wander behavior keeps walking while the command runs.
+        try { bot?.ashfinder?.stop(); } catch {}
+    }
+    suppressed++;
+}
+export function resumeMovement(): void {
+    if (suppressed > 0) suppressed--;
+}
+// True while a command owns movement (used by the stuck detector to avoid
+// hijacking an active collect/survival/etc.).
+export function isMovementSuppressed(): boolean { return suppressed > 0; }
+// Clears any suppression flag left over from a command that was interrupted
+// by a disconnect. Called once per fresh connection in createBot() so a stale
+// flag from the previous session can never freeze the new bot.
+export function resetMovementSuppression(): void { suppressed = 0; }
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -40,6 +61,9 @@ type WanderBehavior =
     | 'look_at_sky'     // tilt head up (daydreaming)
     | 'pace_back_forth' // walk 4 blocks out and back
     | 'circle_spot';    // walk a small circle around current position
+
+// Weight map over the wander behaviors.
+type BehaviorWeightMap = Record<WanderBehavior, number>;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +141,7 @@ function isSafeGround(bot: Mineflayer.Bot, tx: number, ty: number, tz: number): 
     return true;
 }
 
-function randomNearbyGround(bot: Mineflayer.Bot, minDist: number, maxDist: number, memory?: MapMemory): Vec3 | null {
+function randomNearbyGround(bot: Mineflayer.Bot, minDist: number, maxDist: number): Vec3 | null {
     const pos = bot.entity.position;
     const botY = Math.floor(pos.y);
 
@@ -134,10 +158,7 @@ function randomNearbyGround(bot: Mineflayer.Bot, minDist: number, maxDist: numbe
             if (ty < 0) break; // don't go below bedrock
 
             if (isSafeGround(bot, tx, ty, tz)) {
-                const candidate = new Vec3(tx, ty, tz);
-                if (memory?.isNearBadSpot(candidate)) continue;
-                if (memory?.isNearDeathXZ(candidate)) continue;
-                return candidate;
+                return new Vec3(tx, ty, tz);
             }
         }
     }
@@ -282,24 +303,24 @@ async function doStandLook(bot: Mineflayer.Bot) {
     }
 }
 
-async function doShortStroll(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 3, maxDist = 8) {
-    const dest = randomNearbyGround(bot, minDist, maxDist, memory);
+async function doShortStroll(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, minDist = 3, maxDist = 8) {
+    const dest = randomNearbyGround(bot, minDist, maxDist);
     if (!dest || isWaterAt(bot, dest)) return;
     configureBaritone();
-    try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z))); } catch {}
+    await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z)));
     // Look around briefly on arrival — no fixed pause, scheduler handles timing
     try { await bot.look(Math.random() * Math.PI * 2, (Math.random() * 0.3) - 0.1, false); } catch {}
 }
 
-async function doLongWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 8, maxDist = 22) {
-    const dest = randomNearbyGround(bot, minDist, maxDist, memory);
+async function doLongWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, minDist = 8, maxDist = 22) {
+    const dest = randomNearbyGround(bot, minDist, maxDist);
     if (!dest || isWaterAt(bot, dest)) return;
     configureBaritone({ allowSprinting: Math.random() < 0.35, parkour: false });
-    try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z))); } catch {}
+    await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z)));
 }
 
-async function doDistractedWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 5, maxDist = 15) {
-    const dest = randomNearbyGround(bot, minDist, maxDist, memory);
+async function doDistractedWalk(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, minDist = 5, maxDist = 15) {
+    const dest = randomNearbyGround(bot, minDist, maxDist);
     if (!dest || isWaterAt(bot, dest)) return;
     configureBaritone();
     // Fire-and-forget navigation — cancel after a random delay for the "distracted" effect
@@ -345,25 +366,16 @@ async function doLookAtSky(bot: Mineflayer.Bot) {
     await sleep(600);
 }
 
-async function doPaceBackForth(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory, minDist = 3, maxDist = 6) {
-    const dest   = randomNearbyGround(bot, minDist, maxDist, memory);
+async function doPaceBackForth(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, minDist = 3, maxDist = 6) {
+    const dest   = randomNearbyGround(bot, minDist, maxDist);
     if (!dest || isWaterAt(bot, dest)) return;
     const origin = randomNearbyGround(bot, 0, 1) ?? bot.entity.position.clone().floored();
     configureBaritone();
-    try {
-        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z)));
-    } catch {
-        try { bot.ashfinder.stop(); } catch {}
-        return;
-    }
-    try {
-        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(Math.round(origin.x), Math.round(origin.y), Math.round(origin.z))));
-    } catch {
-        try { bot.ashfinder.stop(); } catch {}
-    }
+    await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(dest.x, dest.y, dest.z)));
+    await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(Math.round(origin.x), Math.round(origin.y), Math.round(origin.z))));
 }
 
-async function doCircleSpot(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void, memory?: MapMemory) {
+async function doCircleSpot(bot: Mineflayer.Bot, configureBaritone: (overrides?: Record<string, any>) => void) {
     const pos = bot.entity.position;
     const radius = 3 + Math.floor(Math.random() * 3);
     const steps = 4 + Math.floor(Math.random() * 3);
@@ -375,9 +387,9 @@ async function doCircleSpot(bot: Mineflayer.Bot, configureBaritone: (overrides?:
         const tx = Math.round(pos.x + Math.cos(angle) * radius);
         const tz = Math.round(pos.z + Math.sin(angle) * radius);
         const fallback = new Vec3(tx, Math.round(pos.y), tz);
-        const validated = randomNearbyGround(bot, 0, 1, memory);
+        const validated = randomNearbyGround(bot, 0, 1);
         const target = validated ?? fallback;
-        try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(target.x, target.y, target.z))); } catch {}
+        try { await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(target.x, target.y, target.z))); } catch {}
     }
 }
 
@@ -390,22 +402,19 @@ async function doCircleSpot(bot: Mineflayer.Bot, configureBaritone: (overrides?:
  * @param getState       Callback returning the current BotState string
  * @param configureBaritone  Callback to configure baritone pathfinding options
  * @param HOSTILE_MOBS   Set of hostile mob names (lowercase)
- * @param intervals      Shared intervals array (for cleanup on disconnect)
+ * @param session        The owning BotSession — schedule timers are tracked here
+ *                       so a disconnect cancels them and the loop stops
+ *                       rescheduling against a dead bot
  */
 export function startMovementAI(
     bot: Mineflayer.Bot,
     getState: () => string,
     configureBaritone: (overrides?: Record<string, any>) => void,
     HOSTILE_MOBS: Set<string>,
-    intervals: NodeJS.Timeout[],
-    isEscaping?: () => boolean,
-    memory?: MapMemory,
-    onStuckRegister?: (cb: () => void) => void
+    session: BotSession,
+    isEscaping?: () => boolean
 ) {
     let active = false;
-    let stuckDuringBehavior = false;
-    // Register so stuck detector can notify us mid-behavior
-    onStuckRegister?.(() => { stuckDuringBehavior = true; });
 
     // Glance at players who walk close — feels reactive and aware
     let lastGlanceTime = 0;
@@ -454,26 +463,18 @@ export function startMovementAI(
     }
 
     async function tick(): Promise<WanderBehavior | null> {
-        // Only run when bot is idle
-        if (suppressed || getState() !== 'idle' || active || !bot.entity?.onGround || isEscaping?.()) return null;
+        // Only run when bot is idle — and never while dead
+        if (suppressed > 0 || !session.alive || session.moveActive || getState() !== 'idle' || active || !bot.entity?.onGround || (bot.health ?? 0) <= 0 || isEscaping?.()) return null;
         active = true;
 
-        let trackFall: (() => void) | null = null;
         try {
             const ctx = buildContext(bot, HOSTILE_MOBS);
             // Don't wander if in water or if baritone is already pathing
             if (ctx.isInWater) return null;
             if (bot.ashfinder.isPathing) return null;
 
-            // Merge static context weights with learned weights from memory
-            const contextWeights = getBehaviorWeights(ctx);
-            const learnedWeights = memory?.getWeights();
-            const merged: BehaviorWeightMap = { ...contextWeights };
-            if (learnedWeights) {
-                for (const key of Object.keys(merged) as BehaviorName[]) {
-                    merged[key] = Math.max(1, contextWeights[key] * (learnedWeights[key] / 10));
-                }
-            }
+            // Static context weights drive behavior choice
+            const merged: BehaviorWeightMap = { ...getBehaviorWeights(ctx) };
             const safeRadius = estimateSafeRadius(bot);
             // On a tiny island (< 4 blocks usable), only do stationary behaviors
             if (safeRadius < 4) {
@@ -484,12 +485,6 @@ export function startMovementAI(
                 };
                 const behavior = pickWeighted(stationaryOnly);
                 addLog('movement', `[MOV] ${behavior} (tiny island, safeRadius=${safeRadius})`);
-
-                stuckDuringBehavior = false;
-                const startPos = bot.entity.position.clone();
-                let lowestY = startPos.y;
-                trackFall = () => { if (bot.entity) lowestY = Math.min(lowestY, bot.entity.position.y); };
-                bot.on('physicsTick', trackFall);
 
                 switch (behavior) {
                     case 'stand_look':    await doStandLook(bot); break;
@@ -510,56 +505,16 @@ export function startMovementAI(
             const behavior = pickWeighted(merged);
             addLog('movement', `[MOV] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
 
-            stuckDuringBehavior = false;
-            const startPos = bot.entity.position.clone();
-            let lowestY = startPos.y;
-            trackFall = () => {
-                if (!bot.entity) return;
-                lowestY = Math.min(lowestY, bot.entity.position.y);
-            };
-            bot.on('physicsTick', trackFall);
-
             switch (behavior) {
                 case 'stand_look':      await doStandLook(bot); break;
-                case 'short_stroll':    await doShortStroll(bot, configureBaritone, memory, ...clampDist(3, 8)); break;
-                case 'long_walk':       await doLongWalk(bot, configureBaritone, memory, ...clampDist(8, 22)); break;
-                case 'distracted_walk': await doDistractedWalk(bot, configureBaritone, memory, ...clampDist(5, 15)); break;
+                case 'short_stroll':    await doShortStroll(bot, configureBaritone, ...clampDist(3, 8)); break;
+                case 'long_walk':       await doLongWalk(bot, configureBaritone, ...clampDist(8, 22)); break;
+                case 'distracted_walk': await doDistractedWalk(bot, configureBaritone, ...clampDist(5, 15)); break;
                 case 'crouch_fidget':   await doCrouchFidget(bot); break;
                 case 'look_at_player':  await doLookAtPlayer(bot); break;
                 case 'look_at_sky':     await doLookAtSky(bot); break;
-                case 'pace_back_forth': await doPaceBackForth(bot, configureBaritone, memory, ...clampDist(3, 6)); break;
-                case 'circle_spot':     await doCircleSpot(bot, configureBaritone, memory); break;
-            }
-
-            if (memory) {
-                const endPos = bot.entity.position;
-                const feetBlock = bot.blockAt(endPos.offset(0, 0, 0));
-                const inWater = feetBlock?.name?.includes('water');
-                const fell = (startPos.y - lowestY) > 4;
-                const stuckFired = stuckDuringBehavior;
-                const isStationaryBehavior = (
-                    behavior === 'stand_look' ||
-                    behavior === 'crouch_fidget' ||
-                    behavior === 'look_at_player' ||
-                    behavior === 'look_at_sky'
-                );
-                const stuck = !isStationaryBehavior && (
-                    stuckFired ||
-                    endPos.distanceTo(startPos) < 0.5
-                );
-
-                if (inWater) {
-                    memory.penalize(behavior, 'water');
-                    memory.addBadSpot(endPos, 'water');
-                } else if (fell) {
-                    memory.penalize(behavior, 'fell');
-                    memory.addBadSpot(startPos, 'fell');
-                } else if (stuck) {
-                    memory.penalize(behavior, 'stuck');
-                    memory.addBadSpot(endPos, 'stuck');
-                } else {
-                    memory.reward(behavior);
-                }
+                case 'pace_back_forth': await doPaceBackForth(bot, configureBaritone, ...clampDist(3, 6)); break;
+                case 'circle_spot':     await doCircleSpot(bot, configureBaritone); break;
             }
 
             return behavior;
@@ -567,16 +522,21 @@ export function startMovementAI(
             addLog('warn', `[MOV] tick error: ${(err as any).message}`);
             return null;
         } finally {
-            if (trackFall) bot.off('physicsTick', trackFall);
-            clearControls();
-            if (!suppressed) configureBaritone();
+            // If the session died mid-behavior (disconnect), don't fight over
+            // the dead bot's controls or reset pathfinder config.
+            if (session.alive) {
+                clearControls();
+                // Only restore default baritone config when no command owns
+                // movement — otherwise this would clobber a command's
+                // breakBlocks/allowSprinting settings mid-task.
+                if (suppressed === 0) configureBaritone();
+            }
             active = false;
         }
         return null;
     }
 
     // Schedule ticks with variable delay (5–12s between each behavior)
-    let ticksSinceObservation = 0;
     let lastBehavior: WanderBehavior | null = null;
 
     // Returns a natural next-tick delay based on what just happened.
@@ -607,20 +567,22 @@ export function startMovementAI(
     }
 
     function schedule() {
-        if (!bot.entity) return;
+        if (!session.alive || !bot.entity) return;
         const delay = nextDelay(lastBehavior);
-        const t = setTimeout(async () => {
-            if (!bot.entity) return;
+        let timer: NodeJS.Timeout;
+        timer = session.track(setTimeout(async () => {
+            // The fired timer must be released from the session's registry,
+            // otherwise the registry grows forever (one stale handle per tick).
+            session.untrack(timer);
+            if (!session.alive || !bot.entity) return;
             const behaviorRan = await tick();
+            // After the (potentially long) behavior, re-check the session — a
+            // disconnect may have happened while we were walking/digging. If so,
+            // stop rescheduling so no zombie loop survives on the old bot.
+            if (!session.alive) return;
             if (behaviorRan) lastBehavior = behaviorRan;
-            ticksSinceObservation++;
-            if (memory && ticksSinceObservation >= 6) {
-                ticksSinceObservation = 0;
-                memory.updateBlockObservations(bot);
-            }
             schedule();
-        }, delay);
-        intervals.push(t as any);
+        }, delay));
     }
 
     schedule();

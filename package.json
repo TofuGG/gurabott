@@ -4,28 +4,41 @@
   "name": "gurabot",
   "version": "1.0.0",
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=--max-old-space-size=400 tsx ./src/index.ts",
-    "dev": "node --inspect --loader tsx ./src/index.ts"
+    "start": "cross-env NODE_OPTIONS=\"--experimental-ffi --max-old-space-size=400\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs ./src/index.ts",
+    "dev": "cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe --inspect node_modules/tsx/dist/cli.mjs ./src/index.ts",
+    "test": "cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test.mts && cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test-ui.tsx"
   },
   "dependencies": {
-    "blessed": "^0.1.81",
-    "canvas": "^3.2.3",
+    "@miner-org/mineflayer-baritone": "^4.5.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@opentui/core": "^0.4.5",
+    "@opentui/keymap": "^0.4.5",
+    "@opentui/solid": "^0.4.5",
+    "@tanstack/virtual-core": "^3.17.7",
     "groq-sdk": "^1.1.2",
     "minecraft-data": "^3.110.0",
     "minecraft-protocol": "^1.66.1",
     "mineflayer": "github:PrismarineJS/mineflayer",
-    "@miner-org/mineflayer-baritone": "^4.5.1",
-    "prismarine-viewer": "^1.33.0",
-    "tsx": "^4.21.0"
+    "solid-js": "^1.9.12",
+    "tsx": "^4.21.0",
+    "vec3": "^0.1.7",
+    "zod": "^4.4.3"
   },
   "main": "index.js",
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "> A powerful, customizable Minecraft bot with AI personality, advanced pathfinding, and complete command automation. **No Groq API? No problem** - use as a pure command-based bot!",
   "devDependencies": {
-    "@types/blessed": "^0.1.27",
     "cross-env": "^10.1.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TofuGG/gurabott.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TofuGG/gurabott/issues"
+  },
+  "homepage": "https://github.com/TofuGG/gurabott#readme"
 }

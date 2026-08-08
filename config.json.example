@@ -20,20 +20,14 @@
       "clickDelayMs": 500
     }
   },
-  "logLevel": [
-    "error",
-    "log",
-    "debug"
-  ],
+  "greeting": true,
+  "autoReconnect": true,
+  "mcp": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 5400
+  },
   "action": {
-    "commands": [
-      "forward",
-      "back",
-      "left",
-      "right",
-      "jump"
-    ],
-    "holdDuration": 5000,
     "retryDelay": 5000
   }
 }

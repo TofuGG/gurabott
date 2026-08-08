@@ -7,11 +7,14 @@ import type { Bot } from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
-import { sleep } from '../utils.ts';
-import { addLog } from './tui.ts';
+import { sleep, safeGoto, withTimeout } from '../utils.ts';
+import { addLog } from '../core/store.ts';
 import { BotState, getState, setState, clearAllControls } from './state.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
 import { suppressMovement, resumeMovement } from '../movementAI.ts';
+import { BotSession } from '../session.ts';
+import { RESOURCE_GROUPS, DOOR_NAMES, BLOCK_DROPS } from '../constants.ts';
+import { getBestToolForBlock, waitForPickup, getBestWeapon } from './mining.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -22,6 +25,7 @@ export type CommandContext = {
     personality: any;
     configureBaritone: (overrides?: Record<string, any>) => void;
     intervals: NodeJS.Timeout[];
+    session: BotSession;
     collecting: { active: boolean; summary: Record<string, number> };
     lastPlayerJoined: () => string | null;
     HOSTILE_MOBS: Set<string>;
@@ -31,20 +35,6 @@ export type CommandContext = {
 
 function getRandomDelay(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function getBestWeapon(bot: Bot): any | null {
-    const priorities = [
-        ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe'],
-        ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword'],
-    ];
-    for (const group of priorities) {
-        for (const name of group) {
-            const found = bot.inventory.items().find(i => i.name === name);
-            if (found) return found;
-        }
-    }
-    return null;
 }
 
 function formatMsg(template: string, vars: Record<string, string>): string {
@@ -388,7 +378,11 @@ const commands: Record<string, CommandFn> = {
             bot.chat(personality.messages.goingToSleep);
             configureBaritone();
             try {
-                await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(bed.position.x, bed.position.y, bed.position.z)));
+                await safeGoto(
+                    bot,
+                    new baritoneGoals.GoalExact(new Vec3(bed.position.x, bed.position.y, bed.position.z)),
+                    12000,
+                );
             } catch {
                 bot.chat(personality.messages.cantReachBed);
                 setState(BotState.IDLE);
@@ -408,14 +402,8 @@ const commands: Record<string, CommandFn> = {
     },
 
     async gopendoor({ bot, personality, configureBaritone }) {
-        const doorNames = [
-            'oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door',
-            'dark_oak_door', 'mangrove_door', 'cherry_door', 'crimson_door', 'warped_door',
-            'iron_door', 'oak_trapdoor', 'spruce_trapdoor', 'birch_trapdoor', 'jungle_trapdoor',
-            'acacia_trapdoor', 'dark_oak_trapdoor', 'mangrove_trapdoor', 'iron_trapdoor',
-        ];
         const door = bot.findBlock({
-            matching: (block) => doorNames.includes(block.name),
+            matching: (block) => DOOR_NAMES.includes(block.name),
             maxDistance: 16,
         });
         if (!door) { bot.chat(personality.messages.noDoorNearby); return; }
@@ -423,7 +411,11 @@ const commands: Record<string, CommandFn> = {
 
         try {
             configureBaritone();
-            await bot.ashfinder.goto(new baritoneGoals.GoalNear(new Vec3(door.position.x, door.position.y, door.position.z), 2));
+            await safeGoto(
+                bot,
+                new baritoneGoals.GoalNear(new Vec3(door.position.x, door.position.y, door.position.z), 2),
+                12000,
+            );
             const freshDoor = bot.blockAt(door.position);
             if (!freshDoor) return;
             const openVal = freshDoor.getProperties?.()?.['open'];
@@ -437,20 +429,10 @@ const commands: Record<string, CommandFn> = {
     },
 
     async gcollect({ bot, personality, configureBaritone, collecting }, _username, args) {
-        const resourceGroups: Record<string, string[]> = {
-            wood: [
-                'oak_log', 'acacia_log', 'birch_log', 'cherry_log', 'dark_oak_log', 'jungle_log',
-                'mangrove_log', 'spruce_log', 'oak_wood', 'acacia_wood', 'birch_wood', 'cherry_wood',
-                'dark_oak_wood', 'jungle_wood', 'mangrove_wood', 'spruce_wood',
-            ],
-            stone: ['stone', 'cobblestone'],
-            dirt:  ['dirt'],
-        };
-
         const resourceType = args[0]?.toLowerCase();
         const amount = Math.max(1, parseInt(args[1], 10) || 2);
 
-        if (!resourceType || !resourceGroups[resourceType]) {
+        if (!resourceType || !RESOURCE_GROUPS[resourceType]) {
             bot.chat('Usage: gcollect <wood|stone|dirt> <amount>');
             return;
         }
@@ -459,56 +441,20 @@ const commands: Record<string, CommandFn> = {
 
         addLog('system', `[CMD] gcollect resource="${resourceType}" amount=${amount}`);
 
-        const mcData = minecraftData(bot.version);
-        const resourceTypes = resourceGroups[resourceType];
+        const resourceTypes = RESOURCE_GROUPS[resourceType];
 
-        const getBestTool = (blockName: string): any | null => {
-            const block = mcData.blocksByName[blockName];
-            if (!block || !block.harvestTools) return null;
-            let bestTool = null;
-            let bestTier = -1;
-            for (const item of bot.inventory.items()) {
-                if (!item.name) continue;
-                const tool = mcData.itemsByName[item.name];
-                if (!tool) continue;
-                if (block.harvestTools[(tool as any).id]) {
-                    const tier = ['wooden', 'stone', 'iron', 'diamond', 'netherite', 'golden']
-                        .findIndex(t => item.name.includes(t));
-                    if (tier > bestTier) { bestTier = tier; bestTool = item; }
-                }
-            }
-            return bestTool;
-        };
-
-        const mineBlock = async (blockName: string, amountToMine: number): Promise<number> => {
+        const mineBlock = async (blockName: string, dropNames: string[], amountToMine: number): Promise<number> => {
             let collected = 0;
-
-            const waitForPickup = (targetName: string): Promise<boolean> => {
-                return new Promise(resolve => {
-                    const countBefore = bot.inventory.items().filter(i => i.name === targetName).reduce((s, i) => s + i.count, 0);
-                    let resolved = false;
-
-                    const onCollect = () => {
-                        if (resolved) return;
-                        const countNow = bot.inventory.items().filter(i => i.name === targetName).reduce((s, i) => s + i.count, 0);
-                        if (countNow > countBefore) { resolved = true; cleanup(); resolve(true); }
-                    };
-                    const onPhys = () => { onCollect(); };
-                    const cleanup = () => { resolved = true; bot.removeListener('playerCollect', onCollect); bot.removeListener('physicsTick', onPhys); };
-
-                    bot.on('playerCollect', onCollect);
-                    bot.on('physicsTick', onPhys);
-                    setTimeout(() => { cleanup(); resolve(false); }, 5000);
-                });
-            };
 
             const walkToDroppedItem = async (): Promise<boolean> => {
                 const itemEntity = Object.values(bot.entities).find((e: any) => e?.name === 'item');
                 if (!itemEntity || !itemEntity.position) return false;
                 try {
                     configureBaritone({ breakBlocks: true });
-                    await bot.ashfinder.goto(
-                        new baritoneGoals.GoalNear(new Vec3(itemEntity.position.x, itemEntity.position.y, itemEntity.position.z), 1)
+                    await safeGoto(
+                        bot,
+                        new baritoneGoals.GoalNear(new Vec3(itemEntity.position.x, itemEntity.position.y, itemEntity.position.z), 1),
+                        12000,
                     );
                     await sleep(1500);
                 } catch {}
@@ -519,49 +465,97 @@ const commands: Record<string, CommandFn> = {
                 return block?.name === name;
             };
 
+            // True when the inventory has an empty slot or an existing stack of
+            // `name` that can still absorb more. Stops collection once full.
+            const canPickUpMore = (name: string): boolean => {
+                const slots = bot.inventory.slots;
+                // Main inventory = slots 9..44 (27 main + 9 hotbar = 36)
+                if (slots.slice(9, 45).some(s => s === null)) return true;
+                return bot.inventory.items().some(i => i.name === name && i.count < 64);
+            };
+
+            // Breaks a block but fails to gain it (lava, despawn, full inv).
+            // A few in a row means collection is stuck — bail instead of
+            // looping forever.
+            let brokenWithoutPickup = 0;
+            // Can't path to / never arrives at the block (tiny island, water
+            // gap, unreachable ledge). A few in a row → give up.
+            let unreachableTries = 0;
+
             while (collected < amountToMine && collecting.active) {
+                if (!canPickUpMore(dropNames[0])) {
+                    addLog('warn', `[CMD] Inventory full — cannot collect more ${blockName}`);
+                    break;
+                }
+
                 let block = bot.findBlock({ matching: (b: any) => isMatchingBlock(b, blockName), maxDistance: 32 });
                 if (!block) {
                     addLog('system', `[CMD] No ${blockName} found within 32 blocks, skipping`);
                     break;
                 }
 
-                const tool = getBestTool(blockName);
+                const tool = getBestToolForBlock(bot, blockName);
                 if (tool) {
-                    try { await bot.equip(tool, 'hand'); } catch {}
+                    try { await withTimeout(bot.equip(tool, 'hand'), 5000); } catch {}
                 }
 
                 try {
                     configureBaritone({ breakBlocks: true });
-                    await bot.ashfinder.goto(
-                        new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2)
+                    const nav = await safeGoto(
+                        bot,
+                        new baritoneGoals.GoalNear(new Vec3(block.position.x, block.position.y, block.position.z), 2),
+                        12000,
                     );
-                } catch { await sleep(600); continue; }
+                    // baritone's goto NEVER rejects — it resolves with a status.
+                    // A failed path (island gap, unreachable ledge, water) must
+                    // be treated like an error or we'd dig a block we can't
+                    // reach and hang in bot.dig() forever.
+                    if (nav.status === 'failed') throw new Error(`navigation failed: ${nav.error?.message ?? nav.error ?? ''}`);
+                } catch {
+                    unreachableTries++;
+                    addLog('warn', `[CMD] Could not reach ${blockName} (${unreachableTries}/3)`);
+                    if (unreachableTries >= 3) {
+                        addLog('warn', `[CMD] ${unreachableTries} unreachable blocks in a row — giving up`);
+                        break;
+                    }
+                    await sleep(600);
+                    continue;
+                }
 
                 const freshBlock = bot.blockAt(block.position);
                 if (!freshBlock || freshBlock.name !== blockName) continue;
 
-                const countBefore = bot.inventory.items().filter(i => i.name === blockName).reduce((s, i) => s + i.count, 0);
+                const countBefore = bot.inventory.items().filter(i => dropNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
 
                 configureBaritone({ breakBlocks: true });
                 try {
-                    await bot.dig(freshBlock);
-                } catch { await sleep(600); continue; }
+                    await withTimeout(bot.dig(freshBlock), 12000);
+                } catch {
+                    addLog('warn', `[CMD] Dig of ${blockName} failed or timed out`);
+                    await sleep(600);
+                    continue;
+                }
 
-                const pickedUp = await waitForPickup(blockName);
+                const pickedUp = await waitForPickup(bot, dropNames);
 
                 if (!pickedUp) {
                     await walkToDroppedItem();
                 }
 
-                const countAfter = bot.inventory.items().filter(i => i.name === blockName).reduce((s, i) => s + i.count, 0);
+                const countAfter = bot.inventory.items().filter(i => dropNames.includes(i.name)).reduce((s, i) => s + i.count, 0);
                 if (countAfter > countBefore) {
                     const got = countAfter - countBefore;
                     collected += got;
+                    brokenWithoutPickup = 0;
                     collecting.summary[blockName] = (collecting.summary[blockName] ?? 0) + got;
                     addLog('system', `[CMD] Collected ${blockName} (${collected}/${amountToMine})`);
                 } else {
-                    addLog('warn', `[CMD] Block broken but item not picked up — skipping`);
+                    brokenWithoutPickup++;
+                    addLog('warn', `[CMD] Block broken but item not picked up (${brokenWithoutPickup}/5)`);
+                    if (brokenWithoutPickup >= 5) {
+                        addLog('warn', `[CMD] ${brokenWithoutPickup} broken blocks yielded nothing — inventory full or items lost, stopping`);
+                        break;
+                    }
                 }
 
                 await sleep(400);
@@ -588,8 +582,15 @@ const commands: Record<string, CommandFn> = {
             if (!block) break;
 
             const blockName = block.name;
-            const got = await mineBlock(blockName, remaining);
+            const dropNames = BLOCK_DROPS[blockName] ?? [blockName];
+            const got = await mineBlock(blockName, dropNames, remaining);
             totalCollected += got;
+            if (got === 0) {
+                // No progress on this block (not found, inventory full, or items
+                // lost) — stop rather than retry the same block forever.
+                addLog('warn', '[CMD] No progress collecting — stopping');
+                break;
+            }
             remaining -= got;
         }
 
@@ -621,7 +622,7 @@ const commands: Record<string, CommandFn> = {
         }));
         collecting.summary = {};
     },
-    async gsurv({ bot, configureBaritone }, _username, args) {
+    async gsurv({ bot, configureBaritone, session }, _username, args) {
         const sub = args[0]?.toLowerCase();
         if (sub === 'stop') {
             stopSurv();
@@ -633,7 +634,7 @@ const commands: Record<string, CommandFn> = {
                 bot.chat('Survival already active! Use "gsurv stop" to stop.');
             } else {
                 bot.chat('▶ Starting survival mode...');
-                startSurv(bot, configureBaritone);
+                startSurv(bot, configureBaritone, session);
             }
         }
     },
@@ -655,7 +656,7 @@ export async function handleCommand(
     const handler = commands[command];
     if (!handler) return false;
 
-    suppressMovement();
+    suppressMovement(ctx.bot);
     try {
         // Pass ctx as 4th arg for glast (which needs lastPlayerJoined)
         await (handler as any)(ctx, username, args, ctx);

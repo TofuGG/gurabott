@@ -5,7 +5,7 @@
 
 import Groq from 'groq-sdk';
 import { sleep } from '../utils.ts';
-import { addLog } from './tui.ts';
+import { addLog } from '../core/store.ts';
 import { BotState, getState } from './state.ts';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -56,10 +56,6 @@ const _history: { [player: string]: Message[] } = {};
 
 export function clearHistory(username: string): void {
     delete _history[username];
-}
-
-export function getHistorySize(username: string): number {
-    return _history[username]?.length ?? 0;
 }
 
 // ── Action parser ─────────────────────────────────────────────────────────────

@@ -25,11 +25,14 @@ export interface BotConfig {
             clickDelayMs: number;
         };
     };
-    logLevel: string[];
     greeting: boolean;
+    autoReconnect: boolean;
+    mcp: {
+        enabled: boolean;
+        host: string;
+        port: number;
+    };
     action: {
-        commands: string[];
-        holdDuration: number;
         retryDelay: number;
     };
 }
@@ -38,6 +41,16 @@ export interface BotConfig {
 // from src/), not process.cwd() — so it works no matter what directory the
 // process is launched from.
 const CONFIG_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config.json');
+
+/**
+ * Lazily load a JSON file from the repo root. Used by createBot() after the
+ * interactive setup has guaranteed the files exist on disk.
+ */
+export function loadJson<T>(relativePath: string): T {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', relativePath);
+    const raw = fs.readFileSync(p, 'utf-8');
+    return JSON.parse(raw) as T;
+}
 
 export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
     let existing: BotConfig | null = null;
@@ -85,6 +98,10 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
             };
         }
         if (config.greeting === undefined) config.greeting = true;
+        if (config.autoReconnect === undefined) config.autoReconnect = true;
+        if (!config.mcp) {
+            config.mcp = { enabled: true, host: '127.0.0.1', port: 5400 };
+        }
     } else {
         const host = (await ask(`Enter server IP [${existing?.client.host ?? '127.0.0.1'}]: `)) || existing?.client.host || '127.0.0.1';
         const port = (await ask(`Enter server port [${existing?.client.port ?? '25565'}]: `)) || existing?.client.port || '25565';
@@ -96,6 +113,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
 
         const enableAuth = (await ask(`Does this server require a /login password? (y/n) [${existing?.auth?.enabled ? 'y' : 'n'}]: `)).trim().toLowerCase() === 'y';
         const enableGreeting = (await ask(`Enable player greeting on join? (y/n) [y]: `)).trim().toLowerCase() !== 'n';
+        const enableReconnect = (await ask(`Automatically reconnect after disconnects? (y/n) [y]: `)).trim().toLowerCase() !== 'n';
         const authPassword = enableAuth
             ? (await ask(`Enter login password [${existing?.auth?.password ? '***' : ''}]: `)) || existing?.auth?.password || ''
             : (existing?.auth?.password ?? '');
@@ -125,11 +143,14 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
                     clickDelayMs: 500,
                 },
             },
-            logLevel: existing?.logLevel ?? ['error', 'log', 'debug'],
             greeting: enableGreeting,
+            autoReconnect: enableReconnect,
+            mcp: existing?.mcp ?? {
+                enabled: true,
+                host: '127.0.0.1',
+                port: 5400,
+            },
             action: existing?.action ?? {
-                commands: ['forward', 'back', 'left', 'right', 'jump'],
-                holdDuration: 5000,
                 retryDelay: 5000
             }
         };

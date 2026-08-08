@@ -17,7 +17,7 @@ Gurabott is a **flexible Minecraft bot** that can operate in two modes:
 | **AI-Powered** | Bot responds intelligently, maintains conversations, auto-joins chats | Groq API key |
 | **Command-Based** | Full bot control via chat commands, no AI needed | None! |
 
-The default personality is inspired by **Hatsune Miku**, but you can easily customize it to any character you prefer!
+The default personality is **Gawr Gura** (smol shark girl VTuber, glub glub), but you can easily customize it to any character you prefer!
 
 ---
 
@@ -60,6 +60,8 @@ The default personality is inspired by **Hatsune Miku**, but you can easily cust
 | Command | Function |
 |---------|----------|
 | `gcollect <wood\|stone\|dirt> <amount>` | Auto-mine resources |
+| `gscollect` | Stop collecting and report what was gathered |
+| `gsurv [start\|stop]` | Run/stop autonomous survival progression (wood → tools → stone → iron → diamonds) |
 | `ginv` | Show inventory count |
 | `ginvsee` | Show all items |
 | `geat <item_number> <amount>` | Eat food to restore hunger |
@@ -97,7 +99,7 @@ The default personality is inspired by **Hatsune Miku**, but you can easily cust
 
 ### 🤖 Core Bot Capabilities
 - **Smart Pathfinding** - Navigates obstacles with parkour & sprinting
-- **State Management** - Tracks: idle, following, collecting, fleeing, eating, sleeping
+- **State Management** - Tracks: idle, following, collecting, fleeing, eating, sleeping, attacking
 - **Auto-Reconnect** - Retries up to 5 times on disconnect
 - **Threat Response** - Flees from nearby hostile mobs
 - **Adaptive Behavior** - Eats food when hungry during tasks
@@ -107,10 +109,23 @@ The default personality is inspired by **Hatsune Miku**, but you can easily cust
 ## 🚀 Quick Start
 
 ### Requirements
-- **Node.js** 18+
+- **Node.js** 18+ (the OpenTUI UI needs **Node ≥ 26** with `node:ffi`, see "Runtime" below)
 - **npm** or **pnpm**
 - Minecraft Java Edition server
 - *Optional:* Groq API key (for AI features)
+
+### Runtime (OpenTUI UI)
+
+The terminal UI is built on OpenTUI, which requires Node's experimental
+`node:ffi` module (Node **≥ 26.6**) or Bun. The `npm start` script runs the bot
+through a project-local portable Node 26 (`node-runtime/`). First run:
+
+```bash
+node-runtime\download.ps1   # downloads + extracts Node 26 into node-runtime/
+npm start
+```
+
+`node-runtime/` is gitignored; without it the bot will not start.
 
 ### Installation
 
@@ -118,7 +133,7 @@ The default personality is inspired by **Hatsune Miku**, but you can easily cust
 ```bash
 git clone https://github.com/TofuGG/gurabott.git
 cd gurabott
-npm install
+pnpm install
 ```
 
 2. **Configure**
@@ -139,10 +154,19 @@ cp config.json.example config.json
     "apiKey": "gsk_YOUR_GROQ_API_KEY",
     "maxTokens": 150
   },
-  "logLevel": ["error", "log"],
+  "auth": {
+    "enabled": false,
+    "password": "",
+    "mode": "command"
+  },
+  "greeting": true,
+  "autoReconnect": true,
+  "mcp": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 5400
+  },
   "action": {
-    "commands": ["forward", "back", "left", "right", "jump"],
-    "holdDuration": 5000,
     "retryDelay": 5000
   }
 }
@@ -167,8 +191,10 @@ npm start
 | `ai.enabled` | boolean | Enable AI features |
 | `ai.apiKey` | string | Groq API key (or "YOUR_GROQ_API" to skip) |
 | `ai.maxTokens` | number | Max response length (150-500) |
-| `logLevel` | array | Console logs: error, log, debug |
-| `action.holdDuration` | number | Button press duration (ms) |
+| `auth.*` | object | AuthMe login automation (`mode`: command/gui/anvil/both) |
+| `greeting` | boolean | Say hello when players join |
+| `autoReconnect` | boolean | Reconnect on disconnect |
+| `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
 | `action.retryDelay` | number | Reconnect delay (ms) |
 
 ---
@@ -191,7 +217,7 @@ Edit `personality.json` to completely change how the bot behaves:
 }
 ```
 
-### Example: Change from Miku to Another Character
+### Example: Change from Gura to Another Character
 ```json
 {
   "name": "Aqua",
@@ -226,7 +252,7 @@ Edit `personality.json` to completely change how the bot behaves:
 **How to use Command Mode:**
 - Set `"enabled": false` in config
 - OR leave `apiKey` as `"YOUR_GROQ_API"`
-- Bot will show: *"Sorry, AI features are not available right now. Use basic commands instead!"*
+- Bot will show: *"Sorry, AI is not available. Use basic commands!"*
 
 ---
 
@@ -236,21 +262,43 @@ Edit `personality.json` to completely change how the bot behaves:
 ```
 gurabott/
 ├── src/
-│   ├── bot.ts           # Main bot logic
-│   ├── config.ts        # Config loader
-│   ├── utils.ts         # Helper functions
-│   ├── web.ts           # Web interface
-│   └── index.ts         # Entry point
-├── config.json          # Your configuration
-├── personality.json     # Character personality
-├── package.json         # Dependencies
-└── README.md           # This file
+│   ├── index.ts          # Entry point
+│   ├── bot.ts            # Bot orchestrator (wires all modules)
+│   ├── config.ts         # Config loader
+│   ├── utils.ts          # Helper functions (safeGoto, timeouts)
+│   ├── session.ts        # Per-connection lifecycle
+│   ├── web.ts            # Health-check HTTP server
+│   ├── core/
+│   │   └── store.ts      # Event bus + telemetry/log snapshot store
+│   ├── constants.ts      # Shared block/entity name lists
+│   ├── modules/
+│   │   ├── commands.ts   # All g-command handlers
+│   │   ├── state.ts      # Bot state machine
+│   │   ├── survival.ts   # Autonomous survival loop (gsurv)
+│   │   ├── combat.ts     # Hostile-mob combat & flee controller
+│   │   ├── mining.ts     # Shared mining/tool/pickup helpers
+│   │   ├── water.ts      # Water self-rescue + call-for-help
+│   │   ├── movementAI.ts # Idle/wander behaviors
+│   │   ├── stuckDetector.ts # Physics-based stuck detection
+│   │   ├── ai.ts         # Groq chat integration
+│   │   ├── auth.ts       # AuthMe login automation
+│   │   ├── connection.ts # Reconnect manager
+│   │   ├── mcp.ts        # MCP server (control the bot from any AI)
+│   │   └── mcpCommands.ts # g-commands exposed as MCP tools
+│   ├── ui/               # OpenTUI renderer (React-style components)
+│   └── types/            # Ambient type declarations
+├── config.json           # Your configuration
+├── personality.json      # Character personality
+├── package.json          # Dependencies
+└── README.md            # This file
 ```
 
 ### Core Technologies
 - **Mineflayer** - Minecraft bot framework
-- **mineflayer-pathfinder** - A* pathfinding algorithm
+- **mineflayer-baritone** - Baritone pathfinding (native C++ bridge)
+- **OpenTUI** - Terminal UI framework (Node `node:ffi`)
 - **Groq API** - LLaMA 3.1 AI model
+- **MCP (Model Context Protocol)** - Let any AI observe and control the bot
 - **minecraft-data** - Block/item database
 - **TypeScript** - Type-safe code
 

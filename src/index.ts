@@ -5,18 +5,27 @@
 import { loadConfig } from './config.ts';
 import initWeb from './web.ts';
 import readline from 'readline';
-import { initTUI, addLog, interceptConsole, destroyTUI } from './modules/tui.ts';
+import { addLog, interceptConsole } from './core/store.ts';
 import { handleCommand } from './modules/commands.ts';
 
+let shuttingDown = false;
+
+async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    addLog('system', 'Shutting down...');
+    const tui = await import('./ui/index.tsx');
+    try { await tui.destroyTUI(); } catch {}
+    process.exit(0);
+}
+
 async function main() {
-    let mineflayerViewer: any = null;
-    try {
-        const viewer = await import('prismarine-viewer');
-        mineflayerViewer = viewer.default?.mineflayer || (viewer as any).mineflayer || viewer.default;
-    } catch {}
+    // OpenTUI is the sole terminal UI. The engine never sees the UI — it only
+    // exposes the initTUI/destroyTUI/updateAIStatus surface.
+    const tui = await import('./ui/index.tsx');
 
     // Use readline ONLY for the config prompts before the TUI starts.
-    // We MUST close it before initTUI so blessed gets exclusive stdin ownership.
+    // We MUST close it before initTUI so the TUI gets exclusive stdin ownership.
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -25,19 +34,13 @@ async function main() {
 
     const config = await loadConfig(rl);
 
-    // Hand stdin back — blessed will take it from here.
+    // Hand stdin back — the TUI will take it from here.
     rl.close();
 
-    // BUG FIX: node's readline (used above for the config prompts) installs
-    // its own raw-byte -> 'keypress' decoder on process.stdin. rl.close()
-    // does NOT remove that decoder — it only stops readline from reacting to
-    // 'keypress' events, it leaves the underlying 'data' listener attached.
-    // blessed installs its own, separate 'data' -> 'keypress' decoder when
-    // the TUI starts (its guard flag has a different name, so it doesn't
-    // know readline's decoder is already there). With both decoders alive,
-    // every physical keystroke gets decoded twice, so typing "hello" was
-    // rendered as "hheelllloo". Stripping readline's listeners here gives
-    // blessed a clean stdin to attach to.
+    // node's readline (used above for the config prompts) installs its own
+    // raw-byte -> 'keypress' decoder on process.stdin. rl.close() does NOT
+    // remove that decoder — it leaves the underlying 'data' listener attached.
+    // Stripping readline's listeners here gives the TUI a clean stdin to own.
     process.stdin.removeAllListeners('keypress');
     process.stdin.removeAllListeners('data');
 
@@ -51,12 +54,11 @@ async function main() {
 
     const serverInfo = `${config.client.host}:${config.client.port}  ·  ${config.client.username}`;
 
-    initTUI({
+    await tui.initTUI({
         onCommand: async (cmd: string, args: string[]) => {
             if (cmd === 'quit' || cmd === 'exit') {
-                addLog('system', 'Shutting down...');
-                destroyTUI();
-                process.exit(0);
+                await shutdown();
+                return;
             }
             if (cmd === 'status') {
                 addLog('system', `AI: ${AI_ENABLED ? 'ON' : 'OFF'} | Server: ${config.client.host}:${config.client.port}`);
@@ -68,6 +70,7 @@ async function main() {
             const fullCmd = [cmd, ...args].join(' ');
             await handleCommand(ctx, 'Shell', fullCmd);
         },
+        onExit: shutdown,
         aiEnabled: AI_ENABLED,
         serverInfo,
     });
@@ -85,19 +88,16 @@ async function main() {
     // createBot no longer receives rl — TUI owns input now.
     createBot(
         { ip: config.client.host, port: parseInt(config.client.port, 10), username: config.client.username },
-        mineflayerViewer,
     );
 
     process.on('SIGINT', () => {
         addLog('system', 'SIGINT received, shutting down...');
-        destroyTUI();
-        process.exit(0);
+        void shutdown();
     });
 
     process.on('SIGTERM', () => {
         addLog('system', 'SIGTERM received, shutting down...');
-        destroyTUI();
-        process.exit(0);
+        void shutdown();
     });
 
     process.on('unhandledRejection', (reason: any) => {

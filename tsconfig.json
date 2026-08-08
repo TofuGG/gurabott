@@ -11,7 +11,9 @@
 		"esModuleInterop": true,
 		"allowSyntheticDefaultImports": true,
 		"skipLibCheck": true,
-		"forceConsistentCasingInFileNames": true
-	},
-	"exclude": ["src/bot_old.ts"]
+		"forceConsistentCasingInFileNames": true,
+		"jsx": "react-jsx",
+		"jsxImportSource": "@opentui/solid",
+		"types": ["node"]
+	}
 }

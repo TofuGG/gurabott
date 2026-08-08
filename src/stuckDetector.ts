@@ -3,17 +3,21 @@ import baritonePlugin from '@miner-org/mineflayer-baritone';
 const baritoneGoals = baritonePlugin.goals;
 import { Vec3 } from 'vec3';
 import { sleep } from './utils.ts';
-import { addLog } from './modules/tui.ts';
+import { BotSession } from './session.ts';
+import { BotState, getState } from './modules/state.ts';
+import { addLog } from './core/store.ts';
+import { isMovementSuppressed } from './movementAI.ts';
 
-const STUCK_TICK_THRESHOLD = 60;
+const STUCK_TICK_THRESHOLD = 80;
 const MOVE_MIN = 0.06;
 
-export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void) {
+export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void, session?: BotSession) {
     let lastPos: Vec3 = bot.entity?.position.clone() ?? new Vec3(0, 0, 0);
     let stuckTicks = 0;
     let escaping = false;
 
     bot.on('physicsTick', () => {
+        if (session && !session.alive) return;
         if (!bot.entity) return;
         if ((bot.health ?? 0) <= 0) return;
 
@@ -21,8 +25,33 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
         const moved = pos.distanceTo(lastPos);
         lastPos = pos.clone();
 
+        // A command (gcollect/gsurv/...) or a combat/flee task owns movement
+        // right now — its pauses are digging/mining, not getting stuck. Never
+        // hijack the task with an escape sequence.
+        if (isMovementSuppressed() || session?.moveActive) {
+            stuckTicks = 0;
+            return;
+        }
+
         const onGround = bot.entity.onGround;
         if (!onGround) {
+            stuckTicks = 0;
+            return;
+        }
+
+        // Ignore deliberate idle pauses: movementAI's stand_look / scheduling
+        // gaps are SUPPOSED to keep the bot still. Only treat it as stuck when
+        // the bot is actively pathing or a task/command owns movement.
+        if (getState() === BotState.IDLE && !bot.ashfinder?.isPathing) {
+            stuckTicks = 0;
+            return;
+        }
+
+        // A command/task owns movement (collect, survival, combat, flee): the
+        // pause is deliberate (digging, looting, strafing). Don't hijack it —
+        // those tasks have their own failure handling, and the escape would
+        // fight their active baritone path.
+        if (isMovementSuppressed() || session?.moveActive) {
             stuckTicks = 0;
             return;
         }
@@ -45,6 +74,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
     let stuckResetTimer: NodeJS.Timeout | null = null;
 
     async function unstuck(bot: Bot, stuckPos: Vec3) {
+        if (session && !session.alive) return;
         recentStucks++;
         if (stuckResetTimer) clearTimeout(stuckResetTimer);
         stuckResetTimer = setTimeout(() => { recentStucks = 0; }, 30000);
@@ -55,6 +85,7 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
             escaping = true;
             setEscaping?.(true);
             await sleep(10000);
+            if (session && !session.alive) return;
             escaping = false;
             setEscaping?.(false);
             recentStucks = 0;
@@ -64,6 +95,12 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
         escaping = true;
         setEscaping?.(true);
         addLog('warn', `[STUCK] Detected stuck at ${stuckPos.floored()} — escaping`);
+
+        // Drop any active baritone path BEFORE jiggling controls, otherwise the
+        // task that got us stuck keeps re-asserting its own control states and
+        // the manual escape is fought (and the safety goto throws
+        // "Already navigating").
+        try { bot.ashfinder?.stop(); } catch {}
 
         try {
             bot.setControlState('jump', true);
@@ -82,22 +119,26 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void)
 
             await sleep(400);
         } finally {
-            bot.setControlState('forward', false);
-            bot.setControlState('sprint', false);
-            bot.setControlState('jump', false);
+            // If the session died mid-escape, skip touching the dead bot's
+            // controls or issuing any new pathfinding.
+            if (!session || session.alive) {
+                bot.setControlState('forward', false);
+                bot.setControlState('sprint', false);
+                bot.setControlState('jump', false);
 
-            const stillNear = (bot.entity?.position.distanceTo(stuckPos) ?? 0) < 3;
-            if (stillNear) {
-                try {
-                    const safeSpot = findSafeSpot(bot, stuckPos, 5);
-                    if (safeSpot) {
-                        if (bot.ashfinder?.config) {
-                            bot.ashfinder.config.breakBlocks = true;
+                const stillNear = (bot.entity?.position.distanceTo(stuckPos) ?? 0) < 3;
+                if (stillNear) {
+                    try {
+                        const safeSpot = findSafeSpot(bot, stuckPos, 5);
+                        if (safeSpot) {
+                            if (bot.ashfinder?.config) {
+                                bot.ashfinder.config.breakBlocks = true;
+                            }
+                            await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(safeSpot.x, safeSpot.y, safeSpot.z)));
                         }
-                        await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(safeSpot.x, safeSpot.y, safeSpot.z)));
+                    } catch (err) {
+                        addLog('warn', `[STUCK] Could not pathfind to safety: ${(err as any).message}`);
                     }
-                } catch (err) {
-                    addLog('warn', `[STUCK] Could not pathfind to safety: ${(err as any).message}`);
                 }
             }
 
