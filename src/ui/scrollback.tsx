@@ -28,7 +28,7 @@
  */
 import { Virtualizer } from '@tanstack/virtual-core';
 import { createSignal, onCleanup, onMount } from 'solid-js/dist/solid.js';
-import { onLog, getLogs, type LogEntry } from '../core/store.ts';
+import { onLog, getLogs, MAX_LOG_ENTRIES, type LogEntry } from '../core/store.ts';
 import { theme } from './theme.ts';
 
 const OVERSCAN = 5;
@@ -54,7 +54,14 @@ export function Scrollback() {
     const [entries, setEntries] = createSignal<readonly LogEntry[]>(getLogs());
     onCleanup(
         onLog((entry) => {
-            setEntries((prev) => [...prev, entry]);
+            // Cap the UI mirror at the same limit the store enforces — an
+            // unbounded local array would leak memory and grow the virtualizer
+            // count forever on long sessions.
+            setEntries((prev) => {
+                const next = [...prev, entry];
+                if (next.length > MAX_LOG_ENTRIES) next.splice(0, next.length - MAX_LOG_ENTRIES);
+                return next;
+            });
             sync();
         }),
     );

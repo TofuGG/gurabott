@@ -12,6 +12,7 @@ import { addLog } from '../core/store.ts';
 import { HOSTILE_MOBS } from '../constants.ts';
 import type { BotSession } from '../session.ts';
 import { getBestWeapon } from './mining.ts';
+import { safeGoto } from '../utils.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -141,7 +142,9 @@ export function createCombatController(opts: {
         configureBaritone({ allowSprinting: true });
 
         // Keep recalculating flee destination every 800ms so bot never stops
-        function updateFleeGoal() {
+        let fleeNavBusy = false;
+        async function updateFleeGoal() {
+            if (fleeNavBusy) return;
             if (getState() !== BotState.FLEEING || !bot?.entity) return;
             const botPos    = bot.entity.position;
             const threatPos = threat.position ?? botPos;
@@ -150,15 +153,21 @@ export function createCombatController(opts: {
             const len = Math.sqrt(dx * dx + dz * dz) || 1;
             const runX = botPos.x + (dx / len) * 16;
             const runZ = botPos.z + (dz / len) * 16;
+            // safeGoto, never bare ashfinder.goto(): the bare call never
+            // rejects and a stalled path leaves isPathing=true, freezing the
+            // flee (no more goal refreshes). A short cap keeps legs fresh.
+            fleeNavBusy = true;
             try {
                 if (!bot.ashfinder.isPathing) {
-                    bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(Math.round(runX), Math.round(botPos.y), Math.round(runZ)))).catch(() => {});
+                    await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(Math.round(runX), Math.round(botPos.y), Math.round(runZ))), 4000);
                 }
-            } catch {}
+            } catch {} finally {
+                fleeNavBusy = false;
+            }
         }
 
-        updateFleeGoal();
-        const fleeInterval = setInterval(updateFleeGoal, 800);
+        void updateFleeGoal();
+        const fleeInterval = setInterval(() => { void updateFleeGoal(); }, 800);
         intervals.push(fleeInterval as any);
 
         const dropInterval = () => {
@@ -203,6 +212,7 @@ export function createCombatController(opts: {
         // Also scan for mobs every 2s even if they haven't moved (handles spawns)
         const hostileScanInterval = setInterval(() => {
             if (!bot?.entity || combatActive) return;
+            if ((bot.health ?? 20) <= 0) return;
             if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
             const nearest = getNearestHostile();
             if (!nearest) return;

@@ -292,7 +292,7 @@ export function createBot(
 
     initReconnect({
         maxAttempts: 5,
-        delayMs: CONFIG.action.retryDelay,
+        delayMs: (CONFIG as any).action?.retryDelay ?? 5000,
         onReconnect: () => {
             disconnect();
             if (currentConfig) createBot(currentConfig);
@@ -340,6 +340,13 @@ export function createBot(
         // dead bot during the reconnect delay (would be a zombie loop).
         // disconnect() calls session.end() again — it's idempotent.
         session?.end();
+        // ALSO clear the untracked intervals NOW (telemetry, water survival,
+        // combat hostile scan, gkill attack loops). Previously these survived
+        // until disconnect() ran in the reconnect callback — i.e. they kept
+        // firing against the dead bot for the whole retryDelay window.
+        const snapshot = [...intervals];
+        intervals.length = 0;
+        for (const t of snapshot) { clearTimeout(t); clearInterval(t); }
         pushBotTelemetry();
         setBotHealthStatus(false, 'disconnected');
         triggerReconnect();
@@ -378,10 +385,12 @@ export function createBot(
         addLog('system', `[BOT] Connected to ${config.ip}:${config.port} as ${config.username}`);
         if (AI_ENABLED) {
             const loginMsg = (PERSONALITY as any).messages?.login;
-            if (loginMsg) {
-                setTimeout(() => {
+            if (loginMsg && session) {
+                const t = setTimeout(() => {
+                    session?.untrack(t);
                     try { bot.chat(loginMsg); } catch {}
                 }, 500);
+                session.track(t);
             }
         }
     });
@@ -444,7 +453,14 @@ export function createBot(
             addLog('system', '[BOT] Respawned');
         } catch (err: any) {
             addLog('warn', `[BOT] Respawn attempt ${deathRespawnAttempts}/10 failed — retrying in 3s`);
-            setTimeout(() => { respawnBot().catch(() => {}); }, 3000);
+            // Session-track the retry so a disconnect (and the next connection's
+            // fresh session) clears it — otherwise a stale timer could fire
+            // against the NEW session and wrongly respawn a live connection.
+            const retry = setTimeout(() => {
+                session?.untrack(retry);
+                respawnBot().catch(() => {});
+            }, 3000);
+            session?.track(retry);
         }
     }
 
@@ -550,9 +566,13 @@ export function createBot(
 
         if (CONFIG.greeting === false) return;
         const templates: string[] = (PERSONALITY as any).messages?.playerJoined ?? [];
-        if (templates.length > 0) {
+        if (templates.length > 0 && session) {
             const msg = getRandom(templates).replace('{player}', player.username);
-            setTimeout(() => { try { bot.chat(msg); } catch {} }, 1000);
+            const t = setTimeout(() => {
+                session?.untrack(t);
+                try { bot.chat(msg); } catch {}
+            }, 1000);
+            session.track(t);
         }
     });
 

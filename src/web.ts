@@ -85,6 +85,5 @@ export default (): void => {
 		console.log(`[WEB] Health check server running on http://localhost:${PORT}`);
 		console.log(`[WEB]   GET /health - JSON status`);
 		console.log(`[WEB]   GET /status - HTML status page`);
-		console.log(`[WEB]   GET 3007 - Live bot viewer`);
 	});
 };

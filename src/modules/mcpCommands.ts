@@ -174,7 +174,7 @@ export const commandSpecs: McpCommandSpec[] = [
     },
     {
         tool: 'gscollect',
-        description: 'Scavenge and collect nearby items that are lying on the ground.',
+        description: 'STOP the current collection — cancels an active gcollect/gsurv gathering task and returns the bot to idle.',
         schema: {},
         build: () => 'gscollect',
         argHint: 'gscollect',
@@ -220,28 +220,28 @@ export function registerMcpCommands(server: McpServer, deps: McpCommandDeps): vo
             async (args: any) => {
                 const ctx = deps.getCtx();
                 if (!ctx?.bot?.entity) return deps.errTxt('Bot not spawned');
-                return deps.withExecLock(async () => {
-                    // Await dispatch with a cap: quick commands return their
-                    // recognized result immediately; long ones (gcollect mining,
-                    // gsurv) return "started" and keep running in the background
-                    // so the MCP call never blocks the AI for minutes.
-                    const res = await raceDone(handleCommand(ctx, 'MCP', spec.build(args)), 15_000);
-                    if (res.done) {
-                        return deps.txt({
-                            tool: spec.tool,
-                            recognized: res.value,
-                            note: res.value
-                                ? 'executed — see get_logs for the bot\'s output'
-                                : 'command failed to dispatch — see get_help',
-                        });
-                    }
+                // The lock wraps the command's FULL execution (not just until
+                // the 15s response cap), so a long gcollect/gsurv can't be
+                // overlapped by a second concurrent command fighting for
+                // movement. The cap only bounds the client's wait; the command
+                // keeps running in the background with the lock held.
+                const run = deps.withExecLock(() => handleCommand(ctx, 'MCP', spec.build(args)));
+                const res = await raceDone(run, 15_000);
+                if (res.done) {
                     return deps.txt({
                         tool: spec.tool,
-                        recognized: true,
-                        started: true,
-                        stillRunning: true,
-                        note: 'command is running in the background — poll get_logs / get_inventory for progress',
+                        recognized: res.value,
+                        note: res.value
+                            ? 'executed — see get_logs for the bot\'s output'
+                            : 'command failed to dispatch — see get_help',
                     });
+                }
+                return deps.txt({
+                    tool: spec.tool,
+                    recognized: true,
+                    started: true,
+                    stillRunning: true,
+                    note: 'command is running in the background — poll get_logs / get_inventory for progress',
                 });
             },
         );

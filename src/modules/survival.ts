@@ -37,6 +37,8 @@ let lastStart = 0;
 // checks sessionAlive() so a disconnect aborts the run instead of leaving a
 // zombie loop mining/digging against a dead bot.
 let sessionRef: BotSession | null = null;
+// Unsubscribe handle for the session-end hook registered in startSurv().
+let endHookUnsub: (() => void) | null = null;
 
 function sessionAlive(): boolean {
     return sessionRef ? sessionRef.alive : true;
@@ -45,7 +47,22 @@ function sessionAlive(): boolean {
 export function isSurvRunning() { return running; }
 
 export function startSurv(bot: Bot, configureBaritone: (overrides?: Record<string, any>) => void, session?: BotSession): void {
-    if (session) sessionRef = session;
+    if (session) {
+        // Clear any hook still registered against the previous session.
+        endHookUnsub?.();
+        sessionRef = session;
+        // Reset the module flags the moment the owning connection dies — the
+        // run loop's next step() would do it eventually, but a gsurv issued
+        // during the reconnect window must not be rejected with "already
+        // running" while the stale flag is still set.
+        endHookUnsub = session.onEnd(() => {
+            endHookUnsub = null;
+            if (!running) return;
+            running = false;
+            stopFlag = false;
+            if (getState() === BotState.COLLECTING) setState(BotState.IDLE);
+        });
+    }
     if (!sessionAlive()) { log('Connection closed — survival not starting.'); return; }
     if (running) { log('Already running. Use "gsurv stop" to stop.'); return; }
     // Guard against rapid restart (e.g. loop-end timer + manual gsurv)

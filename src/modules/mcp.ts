@@ -141,8 +141,10 @@ async function withExecLock<T>(fn: () => Promise<T>): Promise<T> {
 /**
  * Resolve with the promise's value if it settles within `ms`, or `{done:false}`
  * when the cap fires. The wrapped promise keeps running in the background — the
- * exec lock is released once this resolves, so long-running commands (gcollect,
- * gsurv) can't block every other MCP control tool for minutes.
+ * caller returns early, but the exec lock is held until the command ACTUALLY
+ * finishes (see withExecLock call sites), so a long-running command (gcollect,
+ * gsurv) can't be overlapped by a second concurrent command fighting for
+ * movement. The cap only bounds the CLIENT's wait, not the command's lifetime.
  */
 function withResponseCap<T>(p: Promise<T>, ms: number): Promise<{ done: boolean; value?: T }> {
     return new Promise((resolve) => {
@@ -377,24 +379,25 @@ function registerAllTools(server: McpServer, getCtx: () => CommandContext | null
         async (args) => {
             const ctx = requireSpawned(getCtx);
             if (!ctx) return errTxt('Bot not spawned');
-            return withExecLock(async () => {
-                const res = await withResponseCap(handleCommand(ctx, 'MCP', args.command), 15_000);
-                if (res.done) {
-                    return txt({
-                        recognized: res.value,
-                        command: args.command,
-                        note: res.value
-                            ? 'executed — see get_logs for the bot\'s output'
-                            : 'unknown command — see get_help for the list',
-                    });
-                }
+            // The lock wraps the command's FULL execution (not just until the
+            // response cap fires), so two long commands can't run concurrently.
+            const run = withExecLock(() => handleCommand(ctx, 'MCP', args.command));
+            const res = await withResponseCap(run, 15_000);
+            if (res.done) {
                 return txt({
-                    recognized: true,
-                    started: true,
-                    stillRunning: true,
+                    recognized: res.value,
                     command: args.command,
-                    note: 'command is running in the background — poll get_logs / get_inventory for progress',
+                    note: res.value
+                        ? 'executed — see get_logs for the bot\'s output'
+                        : 'unknown command — see get_help for the list',
                 });
+            }
+            return txt({
+                recognized: true,
+                started: true,
+                stillRunning: true,
+                command: args.command,
+                note: 'command is running in the background — poll get_logs / get_inventory for progress',
             });
         },
     );

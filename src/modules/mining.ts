@@ -50,7 +50,9 @@ export function getBestToolForBlock(bot: Bot, blockName: string): any | null {
         const tool = mcData.itemsByName[item.name];
         if (!tool) continue;
         if (block.harvestTools[(tool as any).id]) {
-            const tier = ['wooden', 'stone', 'iron', 'diamond', 'netherite', 'golden']
+            // Ascending quality: golden tools mine at wooden-tier speed, so
+            // they rank just above wooden — NOT above netherite.
+            const tier = ['wooden', 'golden', 'stone', 'iron', 'diamond', 'netherite']
                 .findIndex(t => item.name.includes(t));
             if (tier > bestTier) { bestTier = tier; bestTool = item; }
         }

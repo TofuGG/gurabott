@@ -18,6 +18,17 @@ import { getBestToolForBlock, waitForPickup, getBestWeapon } from './mining.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
+// States where a task owns movement and a command must not hijack it. IDLE and
+// FOLLOWING are deliberately excluded: following is a passive state and gfollow
+// should be allowed to switch targets.
+const BUSY_STATES: BotState[] = [
+    BotState.COLLECTING,
+    BotState.EATING,
+    BotState.SLEEPING,
+    BotState.ATTACKING,
+    BotState.FLEEING,
+];
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type CommandContext = {
@@ -205,6 +216,15 @@ const commands: Record<string, CommandFn> = {
         if (!targetName) { bot.chat('Usage: gfollow <player>'); return; }
         if (targetName.toLowerCase() === 'me') targetName = username;
 
+        // Never hijack a task that owns movement (combat/collect/eat/sleep/
+        // flee): stopping combat's follow path mid-fight and taking over the
+        // state leaves the combat attack interval running against the wrong
+        // target. FOLLOWING is allowed so you can switch follow targets.
+        if (BUSY_STATES.includes(getState())) {
+            bot.chat(personality.messages.busy);
+            return;
+        }
+
         const playerEntity = bot.players[targetName]?.entity;
         if (!playerEntity) {
             bot.chat(formatMsg(personality.messages.cantSeePlayer, { player: targetName }));
@@ -215,6 +235,21 @@ const commands: Record<string, CommandFn> = {
         setState(BotState.FOLLOWING);
         bot.chat(formatMsg(personality.messages.followingPlayer, { player: targetName }));
         configureBaritone();
+
+        // baritone's followEntity never resolves or rejects when the followed
+        // player leaves — without this the bot keeps walking to the last known
+        // position and stays in FOLLOWING forever.
+        const onTargetLeft = (p: any) => {
+            if (p?.username !== targetName) return;
+            bot.removeListener('playerLeft', onTargetLeft);
+            try { bot.ashfinder.stop(); } catch {}
+            if (getState() === BotState.FOLLOWING) {
+                setState(BotState.IDLE);
+                bot.chat(personality.messages.stoppedFollowing);
+            }
+        };
+        bot.on('playerLeft', onTargetLeft);
+
         bot.ashfinder.followEntity(playerEntity, { distance: 1 }).catch((err: any) => {
             addLog('error', `[CMD] gfollow followEntity failed: ${err?.message ?? err}`);
         });
@@ -276,6 +311,14 @@ const commands: Record<string, CommandFn> = {
     async gkill({ bot, personality, intervals }, _username, args) {
         const killTarget = args[0]?.toLowerCase();
         if (!killTarget) { bot.chat('Usage: gkill <mob|player name>'); return; }
+
+        // Same gate as gfollow: don't stomp a task that owns movement. A gkill
+        // issued during auto-combat would stop combat's follow path and spin up
+        // a second attack interval fighting for the same target.
+        if (BUSY_STATES.includes(getState())) {
+            bot.chat(personality.messages.busy);
+            return;
+        }
 
         const weapon = getBestWeapon(bot);
         addLog('system', `[CMD] gkill target="${killTarget}" weapon=${weapon?.name ?? 'fist'}`);

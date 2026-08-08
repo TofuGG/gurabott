@@ -51,7 +51,6 @@ export const MAX_LOG_ENTRIES = 2000;
 // ── Log store ─────────────────────────────────────────────────────────────────
 
 let logs: LogEntry[] = [];
-let logSinkCount = 0;
 const logSinks = new Set<(entry: LogEntry) => void>();
 
 export function addLog(type: LogType, text: string): void {
@@ -77,10 +76,8 @@ export function addLog(type: LogType, text: string): void {
  */
 export function onLog(fn: (entry: LogEntry) => void): () => void {
     logSinks.add(fn);
-    logSinkCount++;
     return () => {
         logSinks.delete(fn);
-        logSinkCount = Math.max(0, logSinkCount - 1);
     };
 }
 

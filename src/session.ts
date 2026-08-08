@@ -20,6 +20,7 @@ export class BotSession {
      */
     moveActive = false;
     private timers = new Set<NodeJS.Timeout>();
+    private endHooks = new Set<() => void>();
 
     /** Register a timer so it is cleared when the session ends. Returns the same timer for chaining. */
     track<T extends NodeJS.Timeout>(timer: T): T {
@@ -30,6 +31,16 @@ export class BotSession {
     /** Unregister a timer once it has fired or was cleared manually. */
     untrack(timer: NodeJS.Timeout): void {
         this.timers.delete(timer);
+    }
+
+    /**
+     * Register a callback that fires when the session ends (disconnect). Runs
+     * at most once per registered callback — end() clears the hook set, so a
+     * second end() call does not re-fire them. Returns an unsubscribe.
+     */
+    onEnd(fn: () => void): () => void {
+        this.endHooks.add(fn);
+        return () => { this.endHooks.delete(fn); };
     }
 
     /** Number of still-registered timers (useful for debugging leaks). */
@@ -50,5 +61,10 @@ export class BotSession {
     end(): void {
         this.alive = false;
         this.clearTimers();
+        const hooks = this.endHooks;
+        this.endHooks = new Set();
+        for (const fn of hooks) {
+            try { fn(); } catch {}
+        }
     }
 }

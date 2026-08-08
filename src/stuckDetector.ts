@@ -2,7 +2,7 @@ import { Bot } from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 const baritoneGoals = baritonePlugin.goals;
 import { Vec3 } from 'vec3';
-import { sleep } from './utils.ts';
+import { sleep, safeGoto } from './utils.ts';
 import { BotSession } from './session.ts';
 import { BotState, getState } from './modules/state.ts';
 import { addLog } from './core/store.ts';
@@ -134,7 +134,10 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void,
                             if (bot.ashfinder?.config) {
                                 bot.ashfinder.config.breakBlocks = true;
                             }
-                            await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(safeSpot.x, safeSpot.y, safeSpot.z)));
+                            // safeGoto, never bare ashfinder.goto(): the bare
+                            // call never rejects and can hold the "Already
+                            // navigating" lock forever on an unreachable spot.
+                            await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(safeSpot.x, safeSpot.y, safeSpot.z)));
                         }
                     } catch (err) {
                         addLog('warn', `[STUCK] Could not pathfind to safety: ${(err as any).message}`);

@@ -102,6 +102,13 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         if (!config.mcp) {
             config.mcp = { enabled: true, host: '127.0.0.1', port: 5400 };
         }
+        if (!config.action) {
+            config.action = { retryDelay: 5000 };
+        }
+        // Persist the backfilled config so bot.ts's loadJson() (which re-reads
+        // the file from disk) sees the same fixes instead of a stale legacy
+        // file that still crashes createBot (e.g. missing action.retryDelay).
+        try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch {}
     } else {
         const host = (await ask(`Enter server IP [${existing?.client.host ?? '127.0.0.1'}]: `)) || existing?.client.host || '127.0.0.1';
         const port = (await ask(`Enter server port [${existing?.client.port ?? '25565'}]: `)) || existing?.client.port || '25565';

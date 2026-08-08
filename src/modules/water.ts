@@ -10,7 +10,7 @@ import { Vec3 } from 'vec3';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { BotState, getState } from './state.ts';
 import { addLog } from '../core/store.ts';
-import { getRandom } from '../utils.ts';
+import { getRandom, safeGoto } from '../utils.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -23,9 +23,14 @@ export function startWaterSurvival(opts: {
 
     intervals.push(setInterval(() => {
         if (!bot?.entity) return;
+        if (waterHelpMessages.length === 0) return;
+        // Only call for help while idle — never spam mid-task (combat, mining,
+        // eating, sleeping) where the underwater moment is just a task pause.
+        const state = getState();
+        if (state !== BotState.IDLE && state !== BotState.FOLLOWING) return;
         const headBlock = bot.blockAt(bot.entity.position.offset(0, 1, 0));
         if (headBlock?.name?.includes('water')) {
-            if (waterHelpMessages.length > 0) bot.chat(getRandom(waterHelpMessages));
+            bot.chat(getRandom(waterHelpMessages));
         }
     }, 3000));
 
@@ -77,7 +82,10 @@ export function startWaterSurvival(opts: {
                         maxDistance: 32,
                     });
                     if (dryLand) {
-                        try { await bot.ashfinder.goto(new baritoneGoals.GoalExact(new Vec3(dryLand.position.x, dryLand.position.y + 1, dryLand.position.z))); } catch {}
+                        // safeGoto, never bare ashfinder.goto(): the bare call
+                        // never rejects and can wedge the "Already navigating"
+                        // lock on an unreachable goal, freezing every later goto.
+                        try { await safeGoto(bot, new baritoneGoals.GoalExact(new Vec3(dryLand.position.x, dryLand.position.y + 1, dryLand.position.z))); } catch {}
                     }
                 } catch {
                     bot.setControlState('jump', true);

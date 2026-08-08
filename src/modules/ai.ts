@@ -61,35 +61,36 @@ export function clearHistory(username: string): void {
 // ── Action parser ─────────────────────────────────────────────────────────────
 
 const ACTION_PREFIXES = [
-    'FOLLOW ', 'COLLECT ', 'SLEEP', 'STOP', 'OPEN_DOOR',
-    'DROP_ALL', 'DROP ', 'EAT ', 'JUMP ', 'WALK', 'CROUCH ',
+    'FOLLOW', 'COLLECT', 'SLEEP', 'STOP', 'OPEN_DOOR',
+    'DROP_ALL', 'DROP', 'EAT', 'JUMP', 'WALK', 'CROUCH',
 ] as const;
 
 function isAction(line: string): boolean {
-    return ACTION_PREFIXES.some(p => line.startsWith(p));
+    // Match on the first whitespace-delimited token. The no-arg actions
+    // (SLEEP/STOP/OPEN_DOOR/DROP_ALL/WALK) are matched as whole tokens so a
+    // chat line like "Stop that!" or "Sleep well" is NOT swallowed as an action
+    // and doesn't trigger real bot behavior.
+    const [token] = line.split(/\s+/);
+    return (ACTION_PREFIXES as readonly string[]).includes(token);
 }
 
 function parseLine(line: string): ParsedAction | null {
-    if (line === 'SLEEP')      return { type: 'SLEEP' };
-    if (line === 'STOP')       return { type: 'STOP' };
-    if (line === 'OPEN_DOOR')  return { type: 'OPEN_DOOR' };
-    if (line === 'DROP_ALL')   return { type: 'DROP_ALL' };
-    if (line === 'WALK')       return { type: 'WALK' };
-
-    if (line.startsWith('FOLLOW '))  return { type: 'FOLLOW',  target: line.slice(7).trim() };
-    if (line.startsWith('COLLECT ')) return { type: 'COLLECT', args:   line.slice(8).trim() };
-
-    if (line.startsWith('DROP ')) {
-        const parts = line.slice(5).trim().split(' ');
-        return { type: 'DROP', item: parts[0] ?? '', amount: parseInt(parts[1] ?? '1') || 1 };
+    const [token, ...rest] = line.split(/\s+/);
+    const restText = rest.join(' ');
+    switch (token) {
+        case 'SLEEP':     return { type: 'SLEEP' };
+        case 'STOP':      return { type: 'STOP' };
+        case 'OPEN_DOOR': return { type: 'OPEN_DOOR' };
+        case 'DROP_ALL':  return { type: 'DROP_ALL' };
+        case 'WALK':      return { type: 'WALK' };
+        case 'FOLLOW':    return { type: 'FOLLOW',  target: restText };
+        case 'COLLECT':   return { type: 'COLLECT', args:   restText };
+        case 'DROP':      return { type: 'DROP', item: rest[0] ?? '', amount: parseInt(rest[1] ?? '1', 10) || 1 };
+        case 'EAT':       return { type: 'EAT',  item: restText };
+        case 'JUMP':      return { type: 'JUMP', amount: parseInt(restText, 10) || 1 };
+        case 'CROUCH':    return { type: 'CROUCH', seconds: Math.max(1, parseInt(restText, 10) || 1) };
+        default: return null;
     }
-    if (line.startsWith('EAT '))  return { type: 'EAT',  item:    line.slice(4).trim() };
-    if (line.startsWith('JUMP ')) return { type: 'JUMP', amount:  parseInt(line.slice(5).trim()) || 1 };
-    if (line.startsWith('CROUCH ')) {
-        const secs = Math.max(1, parseInt(line.slice(7).trim()) || 1);
-        return { type: 'CROUCH', seconds: secs };
-    }
-    return null;
 }
 
 export function parseAIReply(reply: string): ParsedAIResponse {

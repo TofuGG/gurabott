@@ -139,7 +139,12 @@ export function initAuth(bot: Bot, cfg: AuthConfig): void {
         // ever send the packet that triggers spawn. 'login' fires immediately
         // on join (the join_game packet), before any authentication.
         bot.once('login', () => {
+            // Flag the moment the connection dies so a stale 1s timer can't
+            // send /login against a dead bot (or a different, reconnected bot).
+            let ended = false;
+            bot.once('end', () => { ended = true; });
             setTimeout(() => {
+                if (ended) return;
                 try {
                     bot.chat(`/login ${cfg.password}`);
                     addLog('system', '[auth] sent /login command');

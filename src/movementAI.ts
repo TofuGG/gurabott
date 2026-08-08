@@ -449,12 +449,18 @@ export function startMovementAI(
 
         const target = entity.position.offset(0, 1.6, 0);
         bot.lookAt(target, false).catch(() => {});
-        setTimeout(() => {
+        // Session-track the drift-back timer and guard against a null entity:
+        // the timer can outlive a disconnect and deref bot.entity.yaw
+        // unguarded (TypeError in an uncaught timer callback).
+        const driftTimer = setTimeout(() => {
+            session.untrack(driftTimer);
+            if (!session.alive || !bot.entity) return;
             if (active || getState() !== 'idle') return;
             const driftYaw = (bot.entity.yaw ?? 0) + (Math.random() * 0.6 - 0.3);
             const driftPitch = (Math.random() * 0.3) - 0.1;
             bot.look(driftYaw, driftPitch, false).catch(() => {});
         }, 1200 + Math.random() * 800);
+        session.track(driftTimer);
     });
 
     function clearControls() {
