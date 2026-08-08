@@ -27,15 +27,30 @@
  * virtualizer and keeps the content box height in step with the entry count.
  */
 import { Virtualizer } from '@tanstack/virtual-core';
-import { createSignal, onCleanup, onMount } from 'solid-js/dist/solid.js';
-import { onLog, getLogs, MAX_LOG_ENTRIES, type LogEntry } from '../core/store.ts';
+import { onCleanup, onMount } from 'solid-js/dist/solid.js';
+import { onLog, getLogs } from '../core/store.ts';
 import { theme } from './theme.ts';
 
 const OVERSCAN = 5;
 const POOL_SIZE = 100;
 
+// toLocaleTimeString is ~50µs/call — far too slow to run per visible row per
+// frame. Entries that land in the same wall-clock second render the same
+// timestamp, so cache the formatted string by second. 600 slots covers a
+// 10-minute scrollback window; anything older just recomputes.
+const TIME_CACHE_MAX = 600;
+const timeCache = new Map<number, string>();
 function fmtTime(ts: number): string {
-    return `${new Date(ts).toLocaleTimeString('en-US', { hour12: false })} `;
+    const sec = Math.floor(ts / 1000);
+    let out = timeCache.get(sec);
+    if (out === undefined) {
+        out = `${new Date(ts).toLocaleTimeString('en-US', { hour12: false })} `;
+        if (timeCache.size >= TIME_CACHE_MAX) {
+            timeCache.delete(timeCache.keys().next().value as number);
+        }
+        timeCache.set(sec, out);
+    }
+    return out;
 }
 
 type FakeScrollEl = {
@@ -51,17 +66,8 @@ type FakeScrollEl = {
 type Slot = { row: any; ts: any; text: any };
 
 export function Scrollback() {
-    const [entries, setEntries] = createSignal<readonly LogEntry[]>(getLogs());
     onCleanup(
-        onLog((entry) => {
-            // Cap the UI mirror at the same limit the store enforces — an
-            // unbounded local array would leak memory and grow the virtualizer
-            // count forever on long sessions.
-            setEntries((prev) => {
-                const next = [...prev, entry];
-                if (next.length > MAX_LOG_ENTRIES) next.splice(0, next.length - MAX_LOG_ENTRIES);
-                return next;
-            });
+        onLog(() => {
             sync();
         }),
     );
@@ -103,7 +109,9 @@ export function Scrollback() {
         const items = inst.getVirtualItems();
         const total = inst.getTotalSize();
         if (contentEl && contentEl.height !== total) contentEl.height = total;
-        const list = entries();
+        // Read the store array directly at call time (it's mutated in place by
+        // the bulk-trimming ring buffer) — no per-append O(n) UI mirror needed.
+        const list = getLogs();
         for (let k = 0; k < slots.length; k++) {
             const slot = slots[k];
             const item = items[k];
@@ -122,7 +130,7 @@ export function Scrollback() {
 
     const sync = (): void => {
         if (!scrollboxEl) return;
-        const n = entries().length;
+        const n = getLogs().length;
         const viewport = scrollboxEl.height ?? 0;
         const rawTop = scrollboxEl.scrollTop ?? 0;
 

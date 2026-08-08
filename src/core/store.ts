@@ -48,6 +48,17 @@ export interface TelemetrySnapshot {
 
 export const MAX_LOG_ENTRIES = 2000;
 
+/**
+ * Trim budget for the log ring buffer. Every push at full capacity would
+ * otherwise `splice` the front element — an O(n) memmove of the whole array on
+ * the hot path (chat/console lines). Instead we let the buffer exceed the cap
+ * by up to LOG_TRIM_BATCH entries and compact once, so trimming is amortized to
+ * ~O(1) per append instead of O(n). The buffer therefore momentarily holds up
+ * to MAX_LOG_ENTRIES + LOG_TRIM_BATCH entries; consumers only ever read via
+ * getLogs()/index guards, so the transient overshoot is invisible.
+ */
+export const LOG_TRIM_BATCH = 500;
+
 // ── Log store ─────────────────────────────────────────────────────────────────
 
 let logs: LogEntry[] = [];
@@ -56,7 +67,7 @@ const logSinks = new Set<(entry: LogEntry) => void>();
 export function addLog(type: LogType, text: string): void {
     const entry: LogEntry = { type, text, ts: Date.now() };
     logs.push(entry);
-    if (logs.length > MAX_LOG_ENTRIES) {
+    if (logs.length > MAX_LOG_ENTRIES + LOG_TRIM_BATCH) {
         logs.splice(0, logs.length - MAX_LOG_ENTRIES);
     }
 

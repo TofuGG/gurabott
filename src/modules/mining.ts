@@ -62,8 +62,11 @@ export function getBestToolForBlock(bot: Bot, blockName: string): any | null {
 
 /**
  * Resolve true once an item matching `names` enters the inventory, or false
- * after `timeoutMs`. Listens to playerCollect + physicsTick (mirrors the
- * historical per-command pickup waits).
+ * after `timeoutMs`. Pickups are detected via the inventory's `updateSlot`
+ * event (fires when a slot changes, including collected items) plus a slow
+ * 150ms fallback poll — NOT a per-physicsTick scan, which called
+ * `inventory.items()` ~20x/sec for the whole wait and became the dominant
+ * per-block cost during gcollect/gsurv.
  */
 export function waitForPickup(bot: Bot, names: string[], timeoutMs = 5000): Promise<boolean> {
     return new Promise(resolve => {
@@ -73,15 +76,22 @@ export function waitForPickup(bot: Bot, names: string[], timeoutMs = 5000): Prom
         const countBefore = countOf();
         let resolved = false;
 
-        const onCollect = () => {
+        const check = () => {
             if (resolved) return;
             if (countOf() > countBefore) { resolved = true; cleanup(); resolve(true); }
         };
-        const onPhys = () => { onCollect(); };
-        const cleanup = () => { resolved = true; bot.removeListener('playerCollect', onCollect); bot.removeListener('physicsTick', onPhys); };
+        const onCollect = () => check();
+        const onSlot = () => check();
+        const poll = setInterval(onSlot, 150);
+        const cleanup = () => {
+            resolved = true;
+            bot.removeListener('playerCollect', onCollect);
+            bot.inventory?.removeListener?.('updateSlot', onSlot);
+            clearInterval(poll);
+        };
 
         bot.on('playerCollect', onCollect);
-        bot.on('physicsTick', onPhys);
+        bot.inventory?.on?.('updateSlot', onSlot);
         setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
     });
 }

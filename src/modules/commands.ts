@@ -513,7 +513,9 @@ const commands: Record<string, CommandFn> = {
             const canPickUpMore = (name: string): boolean => {
                 const slots = bot.inventory.slots;
                 // Main inventory = slots 9..44 (27 main + 9 hotbar = 36)
-                if (slots.slice(9, 45).some(s => s === null)) return true;
+                for (let i = 9; i < 45; i++) {
+                    if (slots[i] === null) return true;
+                }
                 return bot.inventory.items().some(i => i.name === name && i.count < 64);
             };
 
