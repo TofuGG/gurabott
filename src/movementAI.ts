@@ -8,6 +8,7 @@ import { Vec3 } from 'vec3';
 import { sleep, safeGoto } from './utils.ts';
 import { BotSession } from './session.ts';
 import { addLog } from './core/store.ts';
+import type { BotMode } from './modules/mode.ts';
 
 // ── Movement suppression ───────────────────────────────────────────────────────
 // Ref-counted so overlapping commands (two chat messages handled concurrently,
@@ -357,6 +358,26 @@ async function doLookAtPlayer(bot: Mineflayer.Bot) {
     await sleep(1000 + Math.random() * 1500);
 }
 
+// gidle greet: look at the nearest player, then crouch/uncrouch a few times.
+// This is the bot's signature "idle mode" reaction when a player is in range.
+async function doIdleGreet(bot: Mineflayer.Bot) {
+    const nearby = Object.values(bot.players).find(p =>
+        p.username !== bot.username && p.entity &&
+        p.entity.position.distanceTo(bot.entity.position) < 20
+    );
+    if (nearby?.entity) {
+        try { await bot.lookAt(nearby.entity.position.offset(0, 1.6, 0), false); } catch {}
+    }
+    // crouch/uncrouch a few times (2-4 reps)
+    const reps = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < reps; i++) {
+        bot.setControlState('sneak', true);
+        await sleep(300 + Math.random() * 300);
+        bot.setControlState('sneak', false);
+        if (i < reps - 1) await sleep(150 + Math.random() * 250);
+    }
+}
+
 async function doLookAtSky(bot: Mineflayer.Bot) {
     const yaw = Math.random() * Math.PI * 2;
     const pitch = -(0.6 + Math.random() * 0.8);
@@ -412,7 +433,8 @@ export function startMovementAI(
     configureBaritone: (overrides?: Record<string, any>) => void,
     HOSTILE_MOBS: Set<string>,
     session: BotSession,
-    isEscaping?: () => boolean
+    isEscaping?: () => boolean,
+    getMode?: () => BotMode
 ) {
     let active = false;
 
@@ -475,9 +497,27 @@ export function startMovementAI(
 
         try {
             const ctx = buildContext(bot, HOSTILE_MOBS);
+            const mode = getMode?.() ?? 'free';
+
+            // gattack: no idle wandering — combat owns movement
+            if (mode === 'attack') return null;
+
             // Don't wander if in water or if baritone is already pathing
             if (ctx.isInWater) return null;
             if (bot.ashfinder.isPathing) return null;
+
+            // gidle: never walk. Just stand and, when a player is in range,
+            // look at them and crouch/uncrouch a few times.
+            if (mode === 'idle') {
+                if (ctx.nearbyPlayers > 0) {
+                    await doIdleGreet(bot);
+                    addLog('movement', '[MOV] idle greet (look + crouch)');
+                } else {
+                    await doStandLook(bot);
+                    addLog('movement', '[MOV] idle stand');
+                }
+                return 'stand_look';
+            }
 
             // Static context weights drive behavior choice
             const merged: BehaviorWeightMap = { ...getBehaviorWeights(ctx) };

@@ -10,6 +10,7 @@ import minecraftData from 'minecraft-data';
 import { sleep, safeGoto, withTimeout } from '../utils.ts';
 import { addLog } from '../core/store.ts';
 import { BotState, getState, setState, clearAllControls } from './state.ts';
+import { getMode, setMode, type BotMode } from './mode.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
 import { suppressMovement, resumeMovement } from '../movementAI.ts';
 import { BotSession } from '../session.ts';
@@ -682,6 +683,40 @@ const commands: Record<string, CommandFn> = {
                 startSurv(bot, configureBaritone, session);
             }
         }
+    },
+
+    async gidle({ bot, personality }) {
+        setMode('idle');
+        setState(BotState.IDLE);
+        clearAllControls(bot);
+        try { bot.ashfinder?.stop?.(); } catch {}
+        bot.chat(personality.messages?.idleMode ?? 'Idle mode: just chillin, ehehe~');
+    },
+
+    async gattack({ bot, personality }) {
+        setMode('attack');
+        setState(BotState.IDLE);
+        clearAllControls(bot);
+        try { bot.ashfinder?.stop?.(); } catch {}
+        bot.chat(personality.messages?.attackMode ?? 'Attack mode: chomp chomp, I will bite anything that moves!');
+    },
+
+    async gfree({ bot, personality }) {
+        setMode('free');
+        setState(BotState.IDLE);
+        clearAllControls(bot);
+        try { bot.ashfinder?.stop?.(); } catch {}
+        bot.chat(personality.messages?.freeMode ?? 'Free mode: I will decide what to do myself~');
+    },
+
+    async gmode({ bot }) {
+        const m = getMode();
+        const labels: Record<BotMode, string> = {
+            idle: 'IDLE (stand still, greet players)',
+            attack: 'ATTACK (hunt hostiles)',
+            free: 'FREE (decide based on the situation)',
+        };
+        bot.chat(`Mode: ${labels[m]}`);
     },
 };
 

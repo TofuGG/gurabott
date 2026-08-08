@@ -27,6 +27,7 @@ The default personality is **Gawr Gura** (smol shark girl VTuber, glub glub), bu
 ┌─────────────────────────────────────────────────────────┐
 │  💬 Natural Conversations                              │
 │  🎯 Intelligent Command Execution                      │
+│  🧠 Behavior Modes (idle / attack / free)              │
 │  📦 Resource Collection & Management                   │
 │  ⚔️  Combat System (Mobs & Players)                    │
 │  🏠 Environment Interaction (Doors, Beds, Crafting)    │
@@ -42,12 +43,21 @@ The default personality is **Gawr Gura** (smol shark girl VTuber, glub glub), bu
 
 ### 💬 AI & Chat Features
 - **Intelligent Responses** - AI understands context, game state, and conversation history
-- **Three Interaction Modes**:
-  - Direct mention: Responds when name is spoken
-  - Chiming in: Randomly joins conversations (multiplayer)
-  - Solo mode: Responds to everything (single player)
+- **Conversation Windows** - Mentioning the bot's name always gets a reply and opens a window of 3-5 follow-up replies from the same player; otherwise the bot stays quiet until spoken to again
 - **Custom Personality** - Edit `personality.json` to customize responses, character name, and behavior
 - **Optional AI** - Works perfectly fine without an API key (basic commands only)
+
+### 🧠 Behavior Modes
+The bot's autonomous behavior is controlled by a single mode, switchable in-game:
+
+| Command | Function |
+|---------|----------|
+| `gidle` | Stand still and greet nearby players — no wandering, no auto-combat |
+| `gattack` | Hunt and fight hostile mobs on sight |
+| `gfree` | Context-dependent (default): wander, socialize, fight small groups, flee when overwhelmed |
+| `gmode` | Show the current behavior mode |
+
+Switching to `gidle` cancels any active combat/flee immediately.
 
 ### 🎮 Player Interaction
 | Command | Function |
@@ -191,7 +201,7 @@ npm start
 | `ai.enabled` | boolean | Enable AI features |
 | `ai.apiKey` | string | Groq API key (or "YOUR_GROQ_API" to skip) |
 | `ai.maxTokens` | number | Max response length (150-500) |
-| `auth.*` | object | AuthMe login automation (`mode`: command/gui/anvil/both) |
+| `auth.*` | object | AuthMe login automation (`mode`: command/gui/anvil/dialog/both) |
 | `greeting` | boolean | Say hello when players join |
 | `autoReconnect` | boolean | Reconnect on disconnect |
 | `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
@@ -235,7 +245,7 @@ Edit `personality.json` to completely change how the bot behaves:
 
 ### AI Mode (Requires Groq API)
 ✅ Bot responds to chat naturally  
-✅ Auto-chimes into conversations  
+✅ Conversation windows (mention the bot to start chatting)  
 ✅ Makes intelligent decisions  
 ✅ Customizable personality  
 ❌ Requires API key  
@@ -265,6 +275,7 @@ gurabott/
 │   ├── index.ts          # Entry point
 │   ├── bot.ts            # Bot orchestrator (wires all modules)
 │   ├── config.ts         # Config loader
+│   ├── protocolFix.ts    # Runtime fix for 1.21.6+ dialog-system packets
 │   ├── utils.ts          # Helper functions (safeGoto, timeouts)
 │   ├── session.ts        # Per-connection lifecycle
 │   ├── web.ts            # Health-check HTTP server
@@ -274,6 +285,7 @@ gurabott/
 │   ├── modules/
 │   │   ├── commands.ts   # All g-command handlers
 │   │   ├── state.ts      # Bot state machine
+│   │   ├── mode.ts       # Behavior mode controller (gidle/gattack/gfree)
 │   │   ├── survival.ts   # Autonomous survival loop (gsurv)
 │   │   ├── combat.ts     # Hostile-mob combat & flee controller
 │   │   ├── mining.ts     # Shared mining/tool/pickup helpers
@@ -281,7 +293,7 @@ gurabott/
 │   │   ├── movementAI.ts # Idle/wander behaviors
 │   │   ├── stuckDetector.ts # Physics-based stuck detection
 │   │   ├── ai.ts         # Groq chat integration
-│   │   ├── auth.ts       # AuthMe login automation
+│   │   ├── auth.ts       # AuthMe login automation (command/gui/anvil/dialog/both)
 │   │   ├── connection.ts # Reconnect manager
 │   │   ├── mcp.ts        # MCP server (control the bot from any AI)
 │   │   └── mcpCommands.ts # g-commands exposed as MCP tools

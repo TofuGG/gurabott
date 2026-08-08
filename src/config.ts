@@ -17,7 +17,7 @@ export interface BotConfig {
     auth: {
         enabled: boolean;
         password: string;
-        mode: 'command' | 'gui' | 'anvil' | 'both';
+        mode: 'command' | 'gui' | 'anvil' | 'dialog' | 'both';
         debugWindows: boolean;
         gui: {
             titleMatch: string[];
@@ -113,21 +113,29 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         const host = (await ask(`Enter server IP [${existing?.client.host ?? '127.0.0.1'}]: `)) || existing?.client.host || '127.0.0.1';
         const port = (await ask(`Enter server port [${existing?.client.port ?? '25565'}]: `)) || existing?.client.port || '25565';
         const username = (await ask(`Enter bot username [${existing?.client.username ?? 'Bot'}]: `)) || existing?.client.username || 'Bot';
-        const enableAI = (await ask(`Enable AI features? (y/n) [${existing?.ai?.enabled ? 'y' : 'n'}]: `)).trim().toLowerCase() === 'y';
+        const aiDefault = existing?.ai?.enabled ?? false;
+        const aiAns = (await ask(`Enable AI features? (y/n) [${aiDefault ? 'y' : 'n'}]: `)).trim().toLowerCase();
+        const enableAI = aiAns === '' ? aiDefault : aiAns === 'y';
         const apiKey = enableAI 
             ? (await ask(`Enter Groq API key [${existing?.ai?.apiKey ? '***' : 'YOUR_GROQ_API'}]: `)) || existing?.ai?.apiKey || 'YOUR_GROQ_API'
             : 'YOUR_GROQ_API';
 
-        const enableAuth = (await ask(`Does this server require a /login password? (y/n) [${existing?.auth?.enabled ? 'y' : 'n'}]: `)).trim().toLowerCase() === 'y';
-        const enableGreeting = (await ask(`Enable player greeting on join? (y/n) [y]: `)).trim().toLowerCase() !== 'n';
-        const enableReconnect = (await ask(`Automatically reconnect after disconnects? (y/n) [y]: `)).trim().toLowerCase() !== 'n';
+        const authDefault = existing?.auth?.enabled ?? false;
+        const authAns = (await ask(`Does this server require a /login password? (y/n) [${authDefault ? 'y' : 'n'}]: `)).trim().toLowerCase();
+        const enableAuth = authAns === '' ? authDefault : authAns === 'y';
+        const greetingDefault = existing?.greeting ?? true;
+        const greetingAns = (await ask(`Enable player greeting on join? (y/n) [${greetingDefault ? 'y' : 'n'}]: `)).trim().toLowerCase();
+        const enableGreeting = greetingAns === '' ? greetingDefault : greetingAns === 'y';
+        const reconnectDefault = existing?.autoReconnect ?? true;
+        const reconnectAns = (await ask(`Automatically reconnect after disconnects? (y/n) [${reconnectDefault ? 'y' : 'n'}]: `)).trim().toLowerCase();
+        const enableReconnect = reconnectAns === '' ? reconnectDefault : reconnectAns === 'y';
         const authPassword = enableAuth
             ? (await ask(`Enter login password [${existing?.auth?.password ? '***' : ''}]: `)) || existing?.auth?.password || ''
             : (existing?.auth?.password ?? '');
         let authMode: BotConfig['auth']['mode'] = existing?.auth?.mode ?? 'command';
         if (enableAuth) {
-            const modeAns = (await ask(`Login method — command / gui / anvil / both [${authMode}]: `)).trim().toLowerCase();
-            if (modeAns === 'command' || modeAns === 'gui' || modeAns === 'anvil' || modeAns === 'both') {
+            const modeAns = (await ask(`Login method — command / gui / anvil / dialog / both [${authMode}]: `)).trim().toLowerCase();
+            if (modeAns === 'command' || modeAns === 'gui' || modeAns === 'anvil' || modeAns === 'dialog' || modeAns === 'both') {
                 authMode = modeAns;
             }
         }

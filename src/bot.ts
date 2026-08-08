@@ -15,12 +15,14 @@ import { getAIResponse, clearHistory, type AIContext } from './modules/ai.ts';
 import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
+import { installProtocolFix } from './protocolFix.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI, resetMovementSuppression } from './movementAI.ts';
 import { BotSession } from './session.ts';
 import { setBotHealthStatus } from './web.ts';
 import { startMcpServer, stopMcpServer } from './modules/mcp.ts';
 import { createCombatController, type CombatController } from './modules/combat.ts';
+import { getMode, resetMode } from './modules/mode.ts';
 import { startWaterSurvival } from './modules/water.ts';
 import { HOSTILE_MOBS } from './constants.ts';
 import { loadJson } from './config.ts';
@@ -45,11 +47,13 @@ const intervals: NodeJS.Timeout[] = [];
 let session: BotSession | null = null;
 let deathRespawnAttempts = 0;
 let isEscapingStuck = false;
-let lastChimeTime = 0;
 let lastHurtMessageTime = 0;
 let aiDispatchLock = false;
 let spawned = false;
 let isConnected = false;
+// Per-player "conversation window": mentioning the bot's username opens a
+// window of N follow-up replies (3–5). The bot stays quiet outside a window.
+const conversationBudget: Record<string, number> = {};
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 // Push a typed snapshot into the core store so any UI layer renders live
@@ -139,10 +143,6 @@ function getInventorySummary(): string {
     const items = bot?.inventory?.items?.() ?? [];
     if (items.length === 0) return 'empty';
     return items.map(i => `${i.name} x${i.count}`).join(', ');
-}
-
-function getOtherPlayerCount(): number {
-    return Object.keys(bot?.players ?? {}).filter(n => n !== bot.username).length;
 }
 
 // ── AI handler ────────────────────────────────────────────────────────────────
@@ -272,12 +272,13 @@ export function createBot(
 
     // Reset module-level state for clean reconnect
     isEscapingStuck = false;
-    lastChimeTime = 0;
     lastHurtMessageTime = 0;
     aiDispatchLock = false;
     spawned = false;
     collecting.active = false;
     collecting.summary = {};
+    for (const k of Object.keys(conversationBudget)) delete conversationBudget[k];
+    resetMode();
 
     // Fresh session for this connection — the previous session's timers were
     // cleared by disconnect(). resetMovementSuppression() also clears any
@@ -301,6 +302,13 @@ export function createBot(
             addLog('error', 'Reconnect failed. Please restart the bot.');
         },
     });
+
+    // 1.21.6+ dialog-system fix: minecraft-protocol/minecraft-data encode
+    // custom_click_action.payload wrongly (spurious optional bool, no length
+    // prefix). Register the corrected datatype and packet def BEFORE the
+    // serializer is built, so the login dialog's password submit encodes
+    // correctly. Idempotent; harmless for servers without dialogs.
+    installProtocolFix();
 
     bot = Mineflayer.createBot({
         host: config.ip,
@@ -484,44 +492,30 @@ export function createBot(
 
         const botName = bot.username.toLowerCase();
         const msgLower = message.toLowerCase();
-        const state = getState();
 
-        // Solo mode: bot is alone with one player — respond conversationally
-        if (getOtherPlayerCount() === 1 && !msgLower.includes(botName)) {
-            if (state === BotState.IDLE || state === BotState.FOLLOWING) {
-                await handleAIResponse(username, message, 'solo').catch(err => {
-                    addLog('error', `[BOT] AI solo response failed: ${err?.message ?? err}`);
-                });
-            }
-            return;
-        }
+        // Conversation window model: the bot only talks via AI after someone
+        // mentions its username. That opens a window of 3-5 follow-up replies
+        // to the same player, then it goes quiet until mentioned again.
+        // (A mention ALWAYS responds, even mid-task.)
 
-        // H3: Re-check bot alive after AI await
-        if (!bot?.entity || (bot.health ?? 0) <= 0) return;
-
-        // Direct mention
+        // Direct mention — open/refresh the window and respond
         if (msgLower.includes(botName)) {
+            conversationBudget[username] = 3 + Math.floor(Math.random() * 3);
             await handleAIResponse(username, message, 'mentioned').catch(err => {
                 addLog('error', `[BOT] AI mention response failed: ${err?.message ?? err}`);
             });
             return;
         }
 
-        // H3: Re-check bot alive after AI await
-        if (!bot?.entity || (bot.health ?? 0) <= 0) return;
-
-        // Chime on interesting keywords (only when idle, with cooldown)
-        if (state !== BotState.IDLE) return;
-        const keywords = (PERSONALITY as any).interestingKeywords ?? [];
-        const isInteresting = keywords.some((kw: string) => msgLower.includes(kw));
-        if (!isInteresting) return;
-
-        const now = Date.now();
-        if (now - lastChimeTime < 2 * 60 * 1000) return;
-        lastChimeTime = now;
-        await handleAIResponse(username, message, 'chime').catch(err => {
-            addLog('error', `[BOT] AI chime response failed: ${err?.message ?? err}`);
-        });
+        // Inside an open window: keep the conversation going for this player
+        const budget = conversationBudget[username] ?? 0;
+        if (budget > 0) {
+            conversationBudget[username] = budget - 1;
+            await handleAIResponse(username, message, 'solo').catch(err => {
+                addLog('error', `[BOT] AI follow-up response failed: ${err?.message ?? err}`);
+            });
+            return;
+        }
     });
 
     // ── Spawn ────────────────────────────────────────────────────────────────
@@ -548,7 +542,7 @@ export function createBot(
             waterHelpMessages: (PERSONALITY as any).messages?.waterHelp ?? [],
         });
 
-        startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, session!, () => isEscapingStuck);
+        startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, session!, () => isEscapingStuck, getMode);
         addLog('system', '[BOT] Movement AI started');
         addLog('system', '[BOT] All modules initialized');
         setBotHealthStatus(true, 'idle');
@@ -579,6 +573,7 @@ export function createBot(
     bot.on('playerLeft', (player) => {
         if (player?.username) {
             clearHistory(player.username);
+            delete conversationBudget[player.username];
             addLog('system', `${player.username} left`);
         }
     });

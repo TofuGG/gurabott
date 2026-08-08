@@ -8,6 +8,7 @@ import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { BotState, getState, setState } from './state.ts';
+import { getMode, onModeChange, type BotMode } from './mode.ts';
 import { addLog } from '../core/store.ts';
 import { HOSTILE_MOBS } from '../constants.ts';
 import type { BotSession } from '../session.ts';
@@ -37,6 +38,21 @@ export function createCombatController(opts: {
 
     let combatActive = false;
     let combatTimer: NodeJS.Timeout | null = null;
+    // Track the active flee task (interval + its stop timer) so a mode switch
+    // to 'idle' can cancel a flee that's already running.
+    let fleeInterval: NodeJS.Timeout | null = null;
+    let fleeStopTimer: NodeJS.Timeout | null = null;
+
+    // ── Mode helpers ──────────────────────────────────────────────────────────
+    // idle:  never engage, never flee
+    // attack: engage everything within sight, only flee at critical HP
+    // free:   fight ≤3 hostiles, flee if overwhelmed or low HP (default)
+    const ENGAGE_RANGE: Record<BotMode, number> = { idle: 0, attack: 24, free: 8 };
+    const FLEE_HP: Record<BotMode, number> = { idle: 20, attack: 3, free: 5 };
+
+    function mode(): BotMode {
+        return getMode();
+    }
 
     function isHostileEntity(e: any): boolean {
         if (!e?.position || !e.name) return false;
@@ -72,6 +88,19 @@ export function createCombatController(opts: {
             if (idx !== -1) intervals.splice(idx, 1);
             combatTimer = null;
         }
+        // Also cancel a flee that may be running so gidle fully stops the bot
+        if (fleeInterval) {
+            clearInterval(fleeInterval);
+            const idx = intervals.indexOf(fleeInterval);
+            if (idx !== -1) intervals.splice(idx, 1);
+            fleeInterval = null;
+        }
+        if (fleeStopTimer) {
+            clearTimeout(fleeStopTimer);
+            const idx = intervals.indexOf(fleeStopTimer);
+            if (idx !== -1) intervals.splice(idx, 1);
+            fleeStopTimer = null;
+        }
         combatActive = false;
         session.moveActive = false;
         if (getState() === BotState.ATTACKING || getState() === BotState.FLEEING) {
@@ -81,6 +110,8 @@ export function createCombatController(opts: {
 
     function startCombat(target: any) {
         if (combatActive) return;
+        // gidle mode never auto-fights
+        if (mode() === 'idle') return;
         combatActive = true;
         setState(BotState.ATTACKING);
         session.moveActive = true;
@@ -99,11 +130,20 @@ export function createCombatController(opts: {
 
         combatTimer = setInterval(() => {
             const hp = bot.health ?? 20;
+            const fleeHp = FLEE_HP[mode()];
 
-            // Flee if HP critical or mob count overwhelming
-            if (hp <= 5 || countNearbyHostiles() > 5) {
+            // Flee if HP critical (or mob count overwhelming, in free mode)
+            const count = countNearbyHostiles();
+            const overwhelmed = mode() === 'free' && count > 5;
+            if (hp <= fleeHp || overwhelmed) {
                 stopCombat();
                 doFlee(target);
+                return;
+            }
+
+            // gidle could have been set mid-fight — stop immediately
+            if (mode() === 'idle') {
+                stopCombat();
                 return;
             }
 
@@ -112,7 +152,7 @@ export function createCombatController(opts: {
             if (!still || still.position?.distanceTo(bot.entity.position) > 20) {
                 // Check for other nearby mobs to chain-fight
                 const next = getNearestHostile();
-                if (next && next.position?.distanceTo(bot.entity.position) < 10) {
+                if (next && next.position?.distanceTo(bot.entity.position) < ENGAGE_RANGE[mode()]) {
                     stopCombat();
                     startCombat(next);
                 } else {
@@ -132,6 +172,8 @@ export function createCombatController(opts: {
 
     function doFlee(threat: any) {
         if (getState() === BotState.FLEEING) return;
+        // gidle mode never flees either — just stand
+        if (mode() === 'idle') return;
         setState(BotState.FLEEING);
         session.moveActive = true;
         // Same as startCombat: stop any active path so the flee goal can take
@@ -167,18 +209,16 @@ export function createCombatController(opts: {
         }
 
         void updateFleeGoal();
-        const fleeInterval = setInterval(() => { void updateFleeGoal(); }, 800);
+        fleeInterval = setInterval(() => { void updateFleeGoal(); }, 800);
         intervals.push(fleeInterval as any);
 
-        const dropInterval = () => {
+        // Stop fleeing after 6s or when threat is gone
+        fleeStopTimer = setTimeout(() => {
+            clearInterval(fleeInterval as any);
             const idx = intervals.indexOf(fleeInterval as any);
             if (idx !== -1) intervals.splice(idx, 1);
-        };
-
-        // Stop fleeing after 6s or when threat is gone
-        const fleeStopTimer = setTimeout(() => {
-            clearInterval(fleeInterval);
-            dropInterval();
+            fleeInterval = null;
+            fleeStopTimer = null;
             session.moveActive = false;
             if (getState() === BotState.FLEEING) {
                 bot.ashfinder.stop();
@@ -196,9 +236,10 @@ export function createCombatController(opts: {
             if (combatActive) return;
             if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
             if ((bot.health ?? 20) <= 0) return;
+            if (mode() === 'idle') return;
 
             const dist = bot.entity.position.distanceTo(entity.position);
-            if (dist >= 8) return;
+            if (dist >= ENGAGE_RANGE[mode()]) return;
 
             const mobCount = countNearbyHostiles();
             if (mobCount <= 3) {
@@ -214,10 +255,11 @@ export function createCombatController(opts: {
             if (!bot?.entity || combatActive) return;
             if ((bot.health ?? 20) <= 0) return;
             if (getState() === BotState.FLEEING || getState() === BotState.SLEEPING || getState() === BotState.COLLECTING) return;
+            if (mode() === 'idle') return;
             const nearest = getNearestHostile();
             if (!nearest) return;
             const dist = nearest.position?.distanceTo(bot.entity.position) ?? Infinity;
-            if (dist < 8) {
+            if (dist < ENGAGE_RANGE[mode()]) {
                 const mobCount = countNearbyHostiles();
                 if (mobCount <= 3) startCombat(nearest);
                 else doFlee(nearest);
@@ -225,11 +267,21 @@ export function createCombatController(opts: {
         }, 2000);
         intervals.push(hostileScanInterval as any);
 
+        // Switching to gidle mid-fight must stop combat/flee immediately.
+        // The returned unsub is used in the cleanup below so a stale controller
+        // from a previous connection doesn't keep reacting to mode changes.
+        const unsubMode = onModeChange((m) => {
+            if (m === 'idle') {
+                stopCombat();
+            }
+        });
+
         return () => {
             bot.removeListener('entityMoved', onEntityMoved);
             clearInterval(hostileScanInterval);
             const idx = intervals.indexOf(hostileScanInterval as any);
             if (idx !== -1) intervals.splice(idx, 1);
+            unsubMode();
         };
     }
 

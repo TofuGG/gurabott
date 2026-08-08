@@ -4,9 +4,9 @@
   "name": "gurabot",
   "version": "1.0.0",
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=\"--experimental-ffi --max-old-space-size=400\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs ./src/index.ts",
-    "dev": "cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe --inspect node_modules/tsx/dist/cli.mjs ./src/index.ts",
-    "test": "cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test.mts && cross-env NODE_OPTIONS=\"--experimental-ffi\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test-ui.tsx"
+    "start": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning --max-old-space-size=400\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs ./src/index.ts",
+    "dev": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe --inspect node_modules/tsx/dist/cli.mjs ./src/index.ts",
+    "test": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test.mts && cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test-ui.tsx"
   },
   "dependencies": {
     "@miner-org/mineflayer-baritone": "^4.5.1",

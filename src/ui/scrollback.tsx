@@ -191,6 +191,7 @@ export function Scrollback() {
                         top={0}
                         height={1}
                         width="100%"
+                        selectable
                         visible={false}
                         ref={(n: any) => pushSlot(i, 'row', n)}
                     >
