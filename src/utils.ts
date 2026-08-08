@@ -63,40 +63,67 @@ export interface ParsedChat {
     message: string;
 }
 
+// Flatten any chat component (ChatMessage / plain JSON component) to its text.
+// Concatenates every text source (`.text`, legacy `.json['']` / `['']`, and all
+// nested `extra`/`with` children) because components routinely pair an empty or
+// partial `.text` with the real content in `extra`. ChatMessage.toString() is a
+// last resort.
+function extractComponentText(comp: any): string {
+    if (comp == null) return '';
+    if (typeof comp === 'string') return comp;
+    let out = '';
+    if (typeof comp.text === 'string') out += comp.text;
+    if (comp.json && typeof comp.json === 'object' && typeof comp.json[''] === 'string') out += comp.json[''];
+    if (typeof comp[''] === 'string') out += comp[''];
+    for (const key of ['extra', 'with']) {
+        const parts = comp[key];
+        if (Array.isArray(parts)) {
+            for (const p of parts) out += extractComponentText(p);
+        }
+    }
+    if (!out && typeof comp.toString === 'function') {
+        try { const s = comp.toString(); if (s) return s; } catch {}
+    }
+    return out;
+}
+
 export function parseChatMessage(jsonMsg: any, botUsername: string): ParsedChat | null {
     if (!jsonMsg) return null;
 
     const withArr = jsonMsg?.with;
     const translate = jsonMsg?.translate;
 
-    if (translate === 'chat.type.text' && Array.isArray(withArr) && withArr.length >= 2) {
-        const senderObj = withArr[0];
-        const messageObj = withArr[1];
-        const username = senderObj?.text ?? String(senderObj ?? '');
-        let message = '';
-
-        if (typeof messageObj === 'string') {
-            message = messageObj;
-        } else if (messageObj?.text) {
-            message = messageObj.text;
-        } else if (messageObj?.json && typeof messageObj.json === 'object') {
-            message = messageObj.json[''] ?? '';
-        } else if (messageObj?.extra) {
-            message = messageObj.extra.map((e: any) => e.text ?? '').join('');
-        } else if (typeof messageObj?.[''] === 'string') {
-            message = messageObj[''];
-        }
-
-        if (!message || !username || username === botUsername) return null;
-        return { username, message: message.trim() };
+    // (1) Classic / printf client-side chat: sender + content as with[0]/with[1]
+    const isPlayerChat =
+        translate === 'chat.type.text' ||
+        (typeof translate === 'string' && translate.includes('%1$s') && translate.includes('%2$s'));
+    if (isPlayerChat && Array.isArray(withArr) && withArr.length >= 2) {
+        const username = extractComponentText(withArr[0]).trim();
+        const message = extractComponentText(withArr[1]).trim();
+        if (!username || !message || username === botUsername) return null;
+        return { username, message };
     }
 
-    const text = jsonMsg.toString?.() ?? '';
+    // (2) Single-param chat (`%s` + one `with` entry): with[0] is the content
+    // and the sender is only recoverable from `unsigned` (the server's original
+    // chat), which this server family renders as "Name: message".
+    if (translate === '%s' && Array.isArray(withArr) && withArr.length >= 1) {
+        const message = extractComponentText(withArr[0]).trim();
+        if (!message) return null;
+        const unsignedText = extractComponentText(jsonMsg?.unsigned?.with?.[0]).trim();
+        const u = unsignedText.match(/^([^:]+):\s*(.*)/);
+        const username = u?.[1]?.trim() ?? '';
+        if (!username || username === botUsername) return null;
+        return { username, message };
+    }
+
+    // (3) Rendered-text fallback
+    const text = jsonMsg.toString?.() ?? (typeof jsonMsg === 'string' ? jsonMsg : '');
     if (!text) return null;
     const m = text.match(/^<([^>]+)>\s*(.*)/);
     if (!m) return null;
-    const username2 = m[1];
-    const message2 = m[2];
-    if (!message2 || username2 === botUsername) return null;
-    return { username: username2, message: message2 };
+    const username = m[1].trim();
+    const message = m[2].trim();
+    if (!message || username === botUsername) return null;
+    return { username, message };
 }

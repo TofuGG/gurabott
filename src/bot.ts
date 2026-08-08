@@ -474,7 +474,15 @@ export function createBot(
 
     bot.on('message', async (jsonMsg: any) => {
         const parsed = parseChatMessage(jsonMsg, bot.username);
-        if (!parsed) return;
+        if (!parsed) {
+            // Only surface genuinely-unparseable third-party chat — the bot's
+            // own messages (and join banners etc.) are filtered out silently.
+            const raw = JSON.stringify(jsonMsg) ?? '';
+            if (!raw.toLowerCase().includes(bot.username.toLowerCase())) {
+                addLog('warn', `[CHAT] unparsed: ${raw.slice(0, 400)}`);
+            }
+            return;
+        }
         const { username, message } = parsed;
         addLog('chat', `[CHAT] <${username}> ${message}`);
 

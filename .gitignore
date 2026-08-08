@@ -67,3 +67,9 @@ Users/
 
 # Repo-local agent instructions (kept locally, not committed)
 AGENTS.md
+
+# Local AI tooling (opencode plugin + vendored deps)
+.opencode/
+
+# Generated knowledge graph (regenerate with `graphify update .`)
+graphify-out/
