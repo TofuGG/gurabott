@@ -7,8 +7,9 @@
  * experimental `node:ffi` module (Node >= 26.6, --experimental-ffi):
  *
  *   1. If a project-local portable runtime exists (node-runtime/<node-v*>/
- *      from `node-runtime\download.ps1`), use it — this is how the bot runs
- *      even when the system Node is older than 26.6.
+ *      from node-runtime/download.ps1 on Windows or download.sh on
+ *      Linux/macOS), use it — this is how the bot runs even when the system
+ *      Node is older than 26.6.
  *   2. Otherwise fall back to the system `node` (process.execPath).
  *
  * The required flags are passed as CLI arguments (NOT via NODE_OPTIONS, whose
@@ -53,7 +54,9 @@ if (major < 26) {
         `\n❌ OpenTUI needs Node >= 26.6 (node:ffi / --experimental-ffi), ` +
         `but the resolved node is v${major}.x.\n` +
         `   • Install Node 26.6+ and add it to PATH, or\n` +
-        `   • Windows: run node-runtime\\download.ps1 to fetch the portable Node 26.\n`,
+        `   • Windows: run node-runtime\\download.ps1\n` +
+        `   • Linux/macOS: run ./node-runtime/download.sh\n` +
+        `   to fetch the portable Node 26.\n`,
     );
     process.exit(1);
 }

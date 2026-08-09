@@ -14,8 +14,9 @@ dist/
 !index.js
 
 # Portable Node 26 runtime (OpenTUI requires node:ffi / Node >= 26)
-node-runtime/
+node-runtime/*
 !node-runtime/download.ps1
+!node-runtime/download.sh
 
 # Logs
 *.log

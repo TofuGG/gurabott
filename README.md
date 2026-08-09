@@ -33,7 +33,7 @@ The default personality is **Hatsune Miku** (the world's most famous virtual ido
 │  🏠 Environment Interaction (Doors, Beds, Crafting)    │
 │  🧭 Advanced Pathfinding                               │
 │  🔄 Auto-Reconnection                                  │
-│  ⚙️  Fully Customizable Personality                    │
+│  ⚙️ Fully Customizable Personality                     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -138,12 +138,25 @@ The terminal UI is built on OpenTUI, which requires Node's experimental
 npm start
 ```
 
-Windows users can pin to a known-good portable runtime so their system Node
-version doesn't matter:
+You can pin to a known-good portable runtime so your system Node version
+doesn't matter:
 
 ```powershell
-node-runtime\download.ps1   # downloads + extracts Node 26 into node-runtime/
-npm start
+# Windows
+node-runtime\download.ps1
+```
+```bash
+# Linux / macOS
+./node-runtime/download.sh
+```
+
+Then `npm start` again. The script picks the portable Node first, so the bot
+runs even with an older system Node. On Linux/macOS you can also run the bot
+directly once the scripts are executable:
+
+```bash
+chmod +x index.js scripts/run.mjs
+./index.js          # same as `npm start`
 ```
 
 `node-runtime/` is gitignored and **optional** on any platform — without it

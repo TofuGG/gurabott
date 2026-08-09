@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repo so Linux/macOS checkouts never get
+# CRLF (which would break shebang lines in scripts/run.mjs, index.js and
+# node-runtime/download.sh).
+* text=auto eol=lf
