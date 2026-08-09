@@ -21,7 +21,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 26
-          cache: pnpm
+          # No `cache: pnpm` — the repo deliberately gitignores pnpm-lock.yaml,
+          # and setup-node's pnpm cache requires a lockfile to key on.
 
       - name: Install dependencies
         run: pnpm install
