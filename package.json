@@ -31,6 +31,7 @@
   "license": "ISC",
   "description": "> A powerful, customizable Minecraft bot with AI personality, advanced pathfinding, and complete command automation. **No Groq API? No problem** - use as a pure command-based bot!",
   "devDependencies": {
+    "@types/node": "^26.0.0",
     "typescript": "^5.9.3"
   },
   "repository": {
