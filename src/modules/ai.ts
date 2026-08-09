@@ -49,6 +49,25 @@ function recordRequest(): void {
     requestTimestamps.push(Date.now());
 }
 
+// The directedness classifier gets its OWN budget so a busy server (which now
+// judges every chat message) can never starve actual conversation replies.
+// When the classifier is rate-limited it reports "no opinion" and the caller
+// falls back to the old heuristic instead of going deaf.
+const MAX_CLASSIFY_PER_WINDOW = 20;
+const classifyTimestamps: number[] = [];
+
+function isClassifyRateLimited(): boolean {
+    const now = Date.now();
+    while (classifyTimestamps.length > 0 && classifyTimestamps[0] < now - REQUEST_WINDOW_MS) {
+        classifyTimestamps.shift();
+    }
+    return classifyTimestamps.length >= MAX_CLASSIFY_PER_WINDOW;
+}
+
+function recordClassifyRequest(): void {
+    classifyTimestamps.push(Date.now());
+}
+
 // ── Conversation history ──────────────────────────────────────────────────────
 
 type Message = { role: 'user' | 'assistant'; content: string };
@@ -112,6 +131,21 @@ export function parseAIReply(reply: string): ParsedAIResponse {
 
 // ── Main AI call ──────────────────────────────────────────────────────────────
 
+/**
+ * Session 2 — directedness gate. A stateless, single-turn Groq call that
+ * answers a strict YES/NO: was this chat message actually directed at the bot
+ * (talking to it, asking it something, commanding it)? Conversation (session 1)
+ * only runs when this says YES.
+ */
+export type DirectedCheckConfig = {
+    enabled: boolean;
+    model: string;
+    maxTokens: number;
+    timeoutMs: number;
+    /** Prompt; may contain the `{botName}` placeholder. */
+    prompt: string;
+};
+
 export type AIContext = {
     groq: Groq;
     model: string;
@@ -122,6 +156,22 @@ export type AIContext = {
     chimeDuration: string;
     glitchMessage: string;
     maxHistoryPerPlayer: number;
+    directedCheck: DirectedCheckConfig;
+    quiz: QuizConfig;
+};
+
+/**
+ * Hourly-quiz answering. A short, stateless single-turn call that returns just
+ * the answer — deliberately separate from the conversation session so a quiz
+ * reply never pollutes player chat history or waits on the directedness gate.
+ */
+export type QuizConfig = {
+    enabled: boolean;
+    model: string;
+    maxTokens: number;
+    timeoutMs: number;
+    /** System prompt asking for a single short answer. */
+    prompt: string;
 };
 
 export async function getAIResponse(
@@ -194,6 +244,126 @@ export async function getAIResponse(
     } catch (err: any) {
         const msg = err?.name === 'AbortError' ? 'AI request timed out (15s)' : err?.message ?? err;
         addLog('error', `[AI] Groq error: ${msg}`);
+        return null;
+    }
+}
+
+// ── Directedness gate (session 2) ────────────────────────────────────────────
+
+/**
+ * Parse the classifier's reply into a verdict. Returns:
+ *  - true  → message directed at the bot
+ *  - false → not directed
+ *  - null  → couldn't tell (ambiguous/empty) → caller falls back to heuristic
+ */
+export function parseDirectedVerdict(reply: string): boolean | null {
+    const trimmed = reply.trim().toUpperCase();
+    if (/^YES\b/.test(trimmed)) return true;
+    if (/^NO\b/.test(trimmed)) return false;
+    return null;
+}
+
+/**
+ * Build the classifier system prompt, substituting the bot's name into the
+ * `{botName}` placeholder. Pure so it's unit-testable.
+ */
+export function buildDirectedSystemPrompt(basePrompt: string, botName: string): string {
+    return basePrompt.replaceAll('{botName}', botName);
+}
+
+/**
+ * Session 2 — decide whether `message` from `sender` is directed at the bot.
+ * Returns `null` (no opinion) when the check is disabled, rate-limited, or the
+ * request fails/times out; the caller then falls back to the name-mention /
+ * open-window heuristic so the bot never goes deaf on a classifier outage.
+ */
+export async function isMessageDirected(
+    ctx: AIContext,
+    botName: string,
+    sender: string,
+    message: string,
+): Promise<boolean | null> {
+    if (!ctx.directedCheck.enabled) return null;
+    if (isClassifyRateLimited()) {
+        addLog('ai', '[AI] Classifier rate limit reached — using heuristic fallback');
+        return null;
+    }
+
+    const systemContent = buildDirectedSystemPrompt(ctx.directedCheck.prompt, botName);
+    addLog('ai', `[AI] Directedness check from ${sender}: "${message.slice(0, 50)}"`);
+
+    try {
+        recordClassifyRequest();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), ctx.directedCheck.timeoutMs);
+
+        let response;
+        try {
+            response = await ctx.groq.chat.completions.create({
+                model: ctx.directedCheck.model,
+                max_tokens: ctx.directedCheck.maxTokens,
+                messages: [
+                    { role: 'system', content: systemContent },
+                    { role: 'user', content: `${sender}: ${message}` },
+                ],
+            }, { signal: controller.signal as any });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const reply = response.choices[0]?.message?.content?.trim() ?? '';
+        const verdict = parseDirectedVerdict(reply);
+        addLog('ai', `[AI] Directedness verdict (${sender}): ${reply.slice(0, 20)} → ${verdict ?? 'fallback'}`);
+        return verdict;
+    } catch (err: any) {
+        const msg = err?.name === 'AbortError' ? `Classifier timed out (${ctx.directedCheck.timeoutMs}ms)` : err?.message ?? err;
+        addLog('error', `[AI] Classifier error: ${msg}`);
+        return null;
+    }
+}
+
+// ── Quiz answering ────────────────────────────────────────────────────────────
+
+/**
+ * Answer an hourly-quiz question with a single short reply. Returns the
+ * answer text, or null when disabled / failed / timed out.
+ */
+export async function getQuizAnswer(
+    ctx: AIContext,
+    question: string,
+): Promise<string | null> {
+    if (!ctx.quiz.enabled) return null;
+
+    addLog('ai', `[AI] Quiz question: "${question.slice(0, 80)}"`);
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), ctx.quiz.timeoutMs);
+
+        let response;
+        try {
+            response = await ctx.groq.chat.completions.create({
+                model: ctx.quiz.model,
+                max_tokens: ctx.quiz.maxTokens,
+                messages: [
+                    { role: 'system', content: ctx.quiz.prompt },
+                    { role: 'user', content: `Quiz question: ${question}` },
+                ],
+            }, { signal: controller.signal as any });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const answer = response.choices[0]?.message?.content?.trim() ?? '';
+        if (!answer) {
+            addLog('warn', '[AI] Quiz answer empty');
+            return null;
+        }
+        addLog('ai', `[AI] Quiz answer: "${answer.slice(0, 80)}"`);
+        return answer;
+    } catch (err: any) {
+        const msg = err?.name === 'AbortError' ? `Quiz timed out (${ctx.quiz.timeoutMs}ms)` : err?.message ?? err;
+        addLog('error', `[AI] Quiz error: ${msg}`);
         return null;
     }
 }

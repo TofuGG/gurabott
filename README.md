@@ -17,7 +17,7 @@ Gurabott is a **flexible Minecraft bot** that can operate in two modes:
 | **AI-Powered** | Bot responds intelligently, maintains conversations, auto-joins chats | Groq API key |
 | **Command-Based** | Full bot control via chat commands, no AI needed | None! |
 
-The default personality is **Gawr Gura** (smol shark girl VTuber, glub glub), but you can easily customize it to any character you prefer!
+The default personality is **Hatsune Miku** (the world's most famous virtual idol, la la la~), but you can easily customize it to any character you prefer!
 
 ---
 
@@ -48,13 +48,13 @@ The default personality is **Gawr Gura** (smol shark girl VTuber, glub glub), bu
 - **Optional AI** - Works perfectly fine without an API key (basic commands only)
 
 ### 🧠 Behavior Modes
-The bot's autonomous behavior is controlled by a single mode, switchable in-game:
+The bot's autonomous behavior is controlled by a single mode, switchable in-game. It starts each connection in the `behaviorMode` set in `config.json` (default `idle`):
 
 | Command | Function |
 |---------|----------|
-| `gidle` | Stand still and greet nearby players — no wandering, no auto-combat |
+| `gidle` | Stand still and greet nearby players — no wandering, no auto-combat (default) |
 | `gattack` | Hunt and fight hostile mobs on sight |
-| `gfree` | Context-dependent (default): wander, socialize, fight small groups, flee when overwhelmed |
+| `gfree` | Context-dependent: wander, socialize, fight small groups, flee when overwhelmed |
 | `gmode` | Show the current behavior mode |
 
 Switching to `gidle` cancels any active combat/flee immediately.
@@ -127,15 +127,27 @@ Switching to `gidle` cancels any active combat/flee immediately.
 ### Runtime (OpenTUI UI)
 
 The terminal UI is built on OpenTUI, which requires Node's experimental
-`node:ffi` module (Node **≥ 26.6**) or Bun. The `npm start` script runs the bot
-through a project-local portable Node 26 (`node-runtime/`). First run:
+`node:ffi` module (Node **≥ 26.6**) or Bun. The launch scripts
+(`npm start` / `npm test`) auto-detect the best Node automatically:
+
+1. If a project-local portable Node 26 exists in `node-runtime/` (see below),
+   it's used — so the bot runs even if your system Node is older.
+2. Otherwise they fall back to your system `node`, which must be **≥ 26.6**.
 
 ```bash
+npm start
+```
+
+Windows users can pin to a known-good portable runtime so their system Node
+version doesn't matter:
+
+```powershell
 node-runtime\download.ps1   # downloads + extracts Node 26 into node-runtime/
 npm start
 ```
 
-`node-runtime/` is gitignored; without it the bot will not start.
+`node-runtime/` is gitignored and **optional** on any platform — without it
+the bot uses the system Node.
 
 ### Installation
 
@@ -204,8 +216,21 @@ npm start
 | `auth.*` | object | AuthMe login automation (`mode`: command/gui/anvil/dialog/both) |
 | `greeting` | boolean | Say hello when players join |
 | `autoReconnect` | boolean | Reconnect on disconnect |
+| `behaviorMode` | string | Default behavior mode on join: `idle`, `attack`, or `free` (default: `idle`) |
 | `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
 | `action.retryDelay` | number | Reconnect delay (ms) |
+
+---
+
+## 📄 Logs
+
+Every run writes one JSON line per log entry (chat, system, errors, AI, state)
+to two files in the gitignored `logs/` directory:
+
+- `<YYYY-MM-DD-HH-mm-ss-SSS>-<username>.log` — the per-run archive
+- `Latest_Log.txt` — a live mirror of the current run
+
+Retention keeps the newest 10 per-run files; older ones are pruned on startup.
 
 ---
 
@@ -227,7 +252,7 @@ Edit `personality.json` to completely change how the bot behaves:
 }
 ```
 
-### Example: Change from Gura to Another Character
+### Example: Change to Another Character
 ```json
 {
   "name": "Aqua",

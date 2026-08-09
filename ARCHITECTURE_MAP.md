@@ -6,7 +6,7 @@ Generated from the graphify knowledge graph (`graphify-out/graph.json`).
 ## Startup flow
 
 ```
-index.js (portable Node launcher)
+index.js (thin wrapper → scripts/run.mjs)
   → src/index.ts main()          interactive config prompts → shutdown() on exit
       → src/bot.ts createBot()   THE orchestrator hub (27 edges)
           → loadJson()/loadConfig()   lazy-load config.json + personality.json
@@ -94,8 +94,8 @@ Streamable HTTP on 127.0.0.1:5400. `startMcpServer()` (L491), `registerAllTools(
 ### src/index.ts — CLI bootstrap  [Bot Orchestration]
 `main()`, `shutdown()`. Runs interactive prompts over readline, then strips readline stdin listeners before OpenTUI takes over (do not regress).
 
-### index.js — Runtime launcher  [Runtime Launcher]
-Resolves portable Node (gitignored `node-runtime/`) and spawns tsx on src/index.ts.
+### scripts/run.mjs — Cross-platform launcher  [Runtime Launcher]
+Picks the Node binary (portable `node-runtime/` first, system `node` as fallback), injects the OpenTUI-required `--experimental-ffi` CLI flags, and spawns tsx on the requested entry (`src/index.ts`, `src/test.mts`, ...). Both `npm start` and `index.js` delegate here.
 
 ### Config files
 - `config.json` (gitignored) / `config.json.example` — shape source of truth

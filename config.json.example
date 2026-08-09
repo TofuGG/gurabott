@@ -22,6 +22,7 @@
   },
   "greeting": true,
   "autoReconnect": true,
+  "behaviorMode": "idle",
   "mcp": {
     "enabled": true,
     "host": "127.0.0.1",

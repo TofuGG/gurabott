@@ -685,28 +685,25 @@ const commands: Record<string, CommandFn> = {
         }
     },
 
-    async gidle({ bot, personality }) {
+    async gidle({ bot }) {
         setMode('idle');
         setState(BotState.IDLE);
         clearAllControls(bot);
         try { bot.ashfinder?.stop?.(); } catch {}
-        bot.chat(personality.messages?.idleMode ?? 'Idle mode: just chillin, ehehe~');
     },
 
-    async gattack({ bot, personality }) {
+    async gattack({ bot }) {
         setMode('attack');
         setState(BotState.IDLE);
         clearAllControls(bot);
         try { bot.ashfinder?.stop?.(); } catch {}
-        bot.chat(personality.messages?.attackMode ?? 'Attack mode: chomp chomp, I will bite anything that moves!');
     },
 
-    async gfree({ bot, personality }) {
+    async gfree({ bot }) {
         setMode('free');
         setState(BotState.IDLE);
         clearAllControls(bot);
         try { bot.ashfinder?.stop?.(); } catch {}
-        bot.chat(personality.messages?.freeMode ?? 'Free mode: I will decide what to do myself~');
     },
 
     async gmode({ bot }) {

@@ -6,6 +6,7 @@ import { loadConfig } from './config.ts';
 import initWeb from './web.ts';
 import readline from 'readline';
 import { addLog, interceptConsole } from './core/store.ts';
+import { initFileLogging } from './core/logFile.ts';
 import { handleCommand } from './modules/commands.ts';
 
 let shuttingDown = false;
@@ -76,6 +77,8 @@ async function main() {
     });
 
     interceptConsole();
+
+    initFileLogging(config.client.username);
 
     addLog('system', '🤖 Gurabott starting...');
     addLog('system', `Connecting to ${config.client.host}:${config.client.port} as ${config.client.username}`);

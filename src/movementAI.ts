@@ -39,6 +39,10 @@ export function resetMovementSuppression(): void { suppressed = 0; }
 
 const baritoneGoals = baritonePlugin.goals;
 
+// How close (blocks) a player must be for the bot to react socially — glance,
+// greet, and look/crouch behaviors. Beyond this radius the bot ignores them.
+const PLAYER_DETECTION_RADIUS = 5;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type MovementContext = {
@@ -99,7 +103,7 @@ function countNearbyHostiles(bot: Mineflayer.Bot, HOSTILE_MOBS: Set<string>): nu
 function countNearbyPlayers(bot: Mineflayer.Bot): number {
     return Object.values(bot.players).filter(p =>
         p.username !== bot.username && p.entity &&
-        p.entity.position.distanceTo(bot.entity.position) < 20
+        p.entity.position.distanceTo(bot.entity.position) < PLAYER_DETECTION_RADIUS
     ).length;
 }
 
@@ -351,7 +355,7 @@ async function doCrouchFidget(bot: Mineflayer.Bot) {
 async function doLookAtPlayer(bot: Mineflayer.Bot) {
     const nearby = Object.values(bot.players).find(p =>
         p.username !== bot.username && p.entity &&
-        p.entity.position.distanceTo(bot.entity.position) < 20
+        p.entity.position.distanceTo(bot.entity.position) < PLAYER_DETECTION_RADIUS
     );
     if (!nearby?.entity) { await doStandLook(bot); return; }
     try { await bot.lookAt(nearby.entity.position.offset(0, 1.6, 0), false); } catch {}
@@ -363,7 +367,7 @@ async function doLookAtPlayer(bot: Mineflayer.Bot) {
 async function doIdleGreet(bot: Mineflayer.Bot) {
     const nearby = Object.values(bot.players).find(p =>
         p.username !== bot.username && p.entity &&
-        p.entity.position.distanceTo(bot.entity.position) < 20
+        p.entity.position.distanceTo(bot.entity.position) < PLAYER_DETECTION_RADIUS
     );
     if (nearby?.entity) {
         try { await bot.lookAt(nearby.entity.position.offset(0, 1.6, 0), false); } catch {}
@@ -464,8 +468,8 @@ export function startMovementAI(
             return;
         }
 
-        // Medium range (2–5.5 blocks): brief glance then look away
-        if (dist > 5.5) return;
+        // Medium range (2–5 blocks): brief glance then look away
+        if (dist > PLAYER_DETECTION_RADIUS) return;
         if (now - lastGlanceTime < 4000) return;
         lastGlanceTime = now;
 

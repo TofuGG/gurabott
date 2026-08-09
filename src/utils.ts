@@ -1,6 +1,15 @@
 export const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
+ * Natural "typed message" delay for an outgoing chat line, proportional to
+ * its length. Floored so even tiny messages get a small human pause; capped
+ * so long messages don't hang the chat for ages.
+ */
+export function typingDelayMs(length: number, min = 250, max = 2500, msPerChar = 45): number {
+    return Math.min(max, Math.max(min, length * msPerChar));
+}
+
+/**
  * Race `p` against a hard deadline. If the deadline wins, `onTimeout` is
  * invoked (e.g. to cancel an in-flight baritone path) and the promise rejects.
  * Guards long-running async work that can otherwise hang forever — baritone's
@@ -63,14 +72,23 @@ export interface ParsedChat {
     message: string;
 }
 
-// Flatten any chat component (ChatMessage / plain JSON component) to its text.
-// Concatenates every text source (`.text`, legacy `.json['']` / `['']`, and all
-// nested `extra`/`with` children) because components routinely pair an empty or
-// partial `.text` with the real content in `extra`. ChatMessage.toString() is a
-// last resort.
+// Flatten any chat component (ChatMessage / plain JSON component / array of
+// components) to its text. Concatenates every text source (`.text`, legacy
+// `.json['']` / `['']`, and all nested `extra`/`with` children) because
+// components routinely pair an empty or partial `.text` with the real content
+// in `extra`. ChatMessage.toString() is a last resort.
 function extractComponentText(comp: any): string {
+    return flattenChatComponent(comp);
+}
+
+/**
+ * Like extractComponentText but handles top-level ARRAYS of components (some
+ * servers send a chat line as `[{...}, {...}]`) — recurses into every element.
+ */
+export function flattenChatComponent(comp: any): string {
     if (comp == null) return '';
     if (typeof comp === 'string') return comp;
+    if (Array.isArray(comp)) return comp.map(c => flattenChatComponent(c)).join('');
     let out = '';
     if (typeof comp.text === 'string') out += comp.text;
     if (comp.json && typeof comp.json === 'object' && typeof comp.json[''] === 'string') out += comp.json[''];
@@ -78,13 +96,80 @@ function extractComponentText(comp: any): string {
     for (const key of ['extra', 'with']) {
         const parts = comp[key];
         if (Array.isArray(parts)) {
-            for (const p of parts) out += extractComponentText(p);
+            for (const p of parts) out += flattenChatComponent(p);
         }
     }
     if (!out && typeof comp.toString === 'function') {
         try { const s = comp.toString(); if (s) return s; } catch {}
     }
     return out;
+}
+
+// ── Quiz detection ────────────────────────────────────────────────────────────
+// The server posts an hourly quiz: an announce line like
+//   [21:42:38] [21:42] [QUIZ] HOURLY RANDOM QUESTION
+// optionally followed by the question on the same line:
+//   [21:42:38] [21:42] Which food is basically Minecraft premium health insurance?
+// (usually the question arrives as its own follow-up chat line).
+
+const QUIZ_MARKER = /\[QUIZ\]|HOURLY RANDOM QUESTION/i;
+const TIMESTAMP_TOKEN = /\[\d{1,2}:\d{2}(?::\d{2})?\]/g;
+
+/** Strip `[21:42:38]` / `[21:42]` timestamp prefixes from a chat line. */
+export function stripChatTimestamps(text: string): string {
+    return text.replace(TIMESTAMP_TOKEN, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Inspect a flattened chat line for the quiz announce. Returns whether it's a
+ * quiz line and, if the question is on the same line, the question text.
+ * `question: null` means it was just the announce — the question arrives next.
+ */
+export function parseQuizLine(flat: string): { isQuiz: boolean; question: string | null } {
+    if (!QUIZ_MARKER.test(flat)) return { isQuiz: false, question: null };
+    const cleaned = stripChatTimestamps(flat)
+        .replace(/\[QUIZ\]/gi, ' ')
+        .replace(/HOURLY RANDOM QUESTION/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return { isQuiz: true, question: cleaned || null };
+}
+
+/**
+ * Tpa-related commands the bot must NEVER send — neither accepts (`/tpa
+ * accept`, `/tpaccept`, `/tpa yes`) nor requests (`/tpa <player>`,
+ * `/tpahere <player>`). Every spelling starts with `tpa` after the slash;
+ * `/tpaccept` is listed explicitly for clarity. Deliberately does NOT match
+ * `/login`, `/tp <x> <y> <z>` (the gtp command), or plain chat.
+ */
+const TPA_COMMAND_PATTERN = /\/(?:tpa|tpaccept)/i;
+
+export function isTpaCommand(message: string): boolean {
+    return TPA_COMMAND_PATTERN.test(message);
+}
+
+/**
+ * Profanity the bot must NEVER send. Curated to avoid false positives:
+ * `ass` only matches standalone or asshole/asshat/asswipe (so assassin,
+ * assist, assigned, assembly, class, pass, grass all pass), and every term
+ * needs word boundaries (so hello/hellow etc. pass).
+ */
+const PROFANITY_PATTERN = /\b(?:fuck(?:ing|er|ed|s|tard)?|motherfuck(?:er|ing)?|shit(?:ty|s)?|bullshit|bitch(?:es|ing|y)?|ass(?:hole|hat|wipe)?|arse(?:hole)?|bastard(?:s)?|dick(?:s|head)?|cock(?:s|sucker)?|pussy|piss(?:ed|ing)?|cunt(?:s)?|whore(?:s)?|slut(?:s)?|twat(?:s)?|nigga|nigger|retard(?:ed)?|hell(?:ish)?|damn(?:ed)?|goddamn|crap(?:py|s)?)\b/i;
+
+export function containsProfanity(message: string): boolean {
+    return PROFANITY_PATTERN.test(message);
+}
+
+/**
+ * Try to pull the requester's name out of a raw tpa-request chat packet.
+ * Most plugins embed it in the click command (`/tpaccept <name>`); some only
+ * set the `insertion` field. Returns null when neither is present.
+ */
+export function extractTpaSender(raw: string): string | null {
+    const fromCommand = raw.match(/\/tpaccept\s+([A-Za-z0-9_]+)/i);
+    if (fromCommand?.[1]) return fromCommand[1];
+    const fromInsertion = raw.match(/"insertion":"([^"]+)"/);
+    return fromInsertion?.[1] ?? null;
 }
 
 export function parseChatMessage(jsonMsg: any, botUsername: string): ParsedChat | null {

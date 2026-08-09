@@ -5,13 +5,21 @@
  *   - 'idle':   purely social/stationary — look at players in range, crouch/
  *               uncrouch a few times. No wandering, no auto-combat.
  *   - 'attack': aggressive combat — hunt and fight hostiles on sight.
- *   - 'free':   context-dependent (default) — wander, socialize, fight ≤3
+ *   - 'free':   context-dependent — wander, socialize, fight ≤3
  *               hostiles, flee when overwhelmed or low HP.
+ *
+ * The mode the bot starts with on each connection is set by
+ * config.json's `behaviorMode` (default 'idle').
  */
 
 export type BotMode = 'idle' | 'attack' | 'free';
 
-let _mode: BotMode = 'free';
+/** Coerce any value into a valid BotMode, falling back to 'idle'. */
+export function parseMode(value: unknown): BotMode {
+    return value === 'idle' || value === 'attack' || value === 'free' ? value : 'idle';
+}
+
+let _mode: BotMode = 'idle';
 const _listeners = new Set<(mode: BotMode) => void>();
 
 export function getMode(): BotMode {
@@ -33,7 +41,7 @@ export function onModeChange(fn: (mode: BotMode) => void): () => void {
 }
 
 /** Reset to the default mode and drop listeners (call on fresh connection). */
-export function resetMode(): void {
-    _mode = 'free';
+export function resetMode(defaultMode: BotMode = 'idle'): void {
+    _mode = defaultMode;
     _listeners.clear();
 }

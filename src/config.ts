@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import readline from 'readline';
+import type { BotMode } from './modules/mode.ts';
+import { parseMode } from './modules/mode.ts';
 
 export interface BotConfig {
     client: {
@@ -27,6 +29,7 @@ export interface BotConfig {
     };
     greeting: boolean;
     autoReconnect: boolean;
+    behaviorMode: BotMode;
     mcp: {
         enabled: boolean;
         host: string;
@@ -99,6 +102,8 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         }
         if (config.greeting === undefined) config.greeting = true;
         if (config.autoReconnect === undefined) config.autoReconnect = true;
+        if (config.behaviorMode === undefined) config.behaviorMode = 'idle';
+        config.behaviorMode = parseMode(config.behaviorMode);
         if (!config.mcp) {
             config.mcp = { enabled: true, host: '127.0.0.1', port: 5400 };
         }
@@ -129,6 +134,9 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         const reconnectDefault = existing?.autoReconnect ?? true;
         const reconnectAns = (await ask(`Automatically reconnect after disconnects? (y/n) [${reconnectDefault ? 'y' : 'n'}]: `)).trim().toLowerCase();
         const enableReconnect = reconnectAns === '' ? reconnectDefault : reconnectAns === 'y';
+        const behaviorModeDefault = existing?.behaviorMode ?? 'idle';
+        const modeAns = (await ask(`Default behavior mode on join — idle / attack / free [${behaviorModeDefault}]: `)).trim().toLowerCase();
+        const behaviorMode: BotMode = modeAns === '' ? behaviorModeDefault : (['idle', 'attack', 'free'].includes(modeAns) ? modeAns as BotMode : behaviorModeDefault);
         const authPassword = enableAuth
             ? (await ask(`Enter login password [${existing?.auth?.password ? '***' : ''}]: `)) || existing?.auth?.password || ''
             : (existing?.auth?.password ?? '');
@@ -160,6 +168,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
             },
             greeting: enableGreeting,
             autoReconnect: enableReconnect,
+            behaviorMode,
             mcp: existing?.mcp ?? {
                 enabled: true,
                 host: '127.0.0.1',

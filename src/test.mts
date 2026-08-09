@@ -1,8 +1,10 @@
 // Full regression test suite
 import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
-import { parseAIReply } from './modules/ai.ts';
-import { sleep, getRandom } from './utils.ts';
+import { parseMode } from './modules/mode.ts';
+import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from './modules/ai.ts';
+import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
+import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -37,6 +39,16 @@ await section('State Machine', async () => {
     assert('Unsub listener not called', changes.length === 2);
     resetState();
     assert('Reset returns to IDLE', getState() === BotState.IDLE);
+});
+
+// BEHAVIOR MODE PARSER
+await section('Behavior Mode Parser', async () => {
+    assert('idle parsed', parseMode('idle') === 'idle');
+    assert('attack parsed', parseMode('attack') === 'attack');
+    assert('free parsed', parseMode('free') === 'free');
+    assert('Invalid falls back to idle', parseMode('bogus') === 'idle');
+    assert('Missing falls back to idle', parseMode(undefined) === 'idle');
+    assert('Case-sensitive reject', parseMode('IDLE') === 'idle');
 });
 
 // AI REPLY PARSER
@@ -94,6 +106,81 @@ await section('Utils', async () => {
     assert('getRandom single-item', getRandom(['x']) === 'x');
 });
 
+// TPA GUARD
+await section('TPA Guard', async () => {
+    // isTpaCommand blocks every accept AND request variant
+    for (const cmd of [
+        '/tpa accept Steve',
+        '/tpaaccept Steve',
+        '/tpaccept',
+        '/tpaccept Steve',
+        '/tpa yes',
+        '/tpahere accept',
+        '/tpahereaccept',
+        '/TPA ACCEPT STEVE',
+        '/tpa Steve',
+        '/tpahere Steve',
+    ]) {
+        assert(`Blocks "${cmd}"`, isTpaCommand(cmd), isTpaCommand(cmd), true);
+    }
+    // ...but allows normal chat and legit bot commands
+    for (const msg of [
+        'I don\'t accept tpa but thanks for wanting to be with me!',
+        '/login mypassword',
+        '/tp 100 64 -200',
+        'hello there!',
+    ]) {
+        assert(`Allows "${msg}"`, !isTpaCommand(msg));
+    }
+
+    // extractTpaSender
+    assert('Sender from click command', extractTpaSender('{"click_event":{"command":"/tpaccept Steve"}}') === 'Steve');
+    assert('Sender from insertion', extractTpaSender('{"insertion":"Alice"}') === 'Alice');
+    assert('Sender prefers command over insertion', extractTpaSender('{"insertion":"Alice","click_event":{"command":"/tpaccept Steve"}}') === 'Steve');
+    assert('No sender -> null', extractTpaSender('{"click_event":{"command":"/tpaccept"}}') === null);
+    assert('Unrelated json -> null', extractTpaSender('{"text":"hello"}') === null);
+});
+
+// TYPING DELAY
+await section('Typing Delay', async () => {
+    assert('Empty floored to min', typingDelayMs(0) === 250);
+    assert('Short floored to min', typingDelayMs(5) === 250);
+    assert('Linear mid (30 chars)', typingDelayMs(30) === 1350);
+    assert('60 chars capped at max', typingDelayMs(60) === 2500);
+    assert('Long capped at max', typingDelayMs(100) === 2500);
+    assert('Custom msPerChar', typingDelayMs(10, 100, 5000, 20) === 200);
+    assert('Custom max', typingDelayMs(500, 100, 500, 20) === 500);
+});
+
+// PROFANITY FILTER
+await section('Profanity Filter', async () => {
+    for (const msg of [
+        'fuck this',
+        'that is bullshit',
+        'you fucking idiot',
+        'shut the hell up',
+        'you asshole',
+        'what the damn hell',
+        'crap, I lost',
+    ]) {
+        assert(`Blocks "${msg}"`, containsProfanity(msg));
+    }
+    for (const msg of [
+        'assassin',
+        'assist me please',
+        'the class assignment',
+        'assembly line',
+        'hello world',
+        'grass is green',
+        'pass the leeks',
+        'popipo la la la',
+        'I will sing you a song',
+        'you helped a lot',
+    ]) {
+        assert(`Allows "${msg}"`, !containsProfanity(msg), containsProfanity(msg), false);
+    }
+});
+
 // CONNECTION MANAGER
 await section('Connection Manager', async () => {
     let r = 0, gave = false;
@@ -107,6 +194,78 @@ await section('Connection Manager', async () => {
     initReconnect({ maxAttempts: 2, delayMs: 1, onReconnect: () => r2++, onGiveUp: () => {} });
     await triggerReconnect(); await triggerReconnect();
     assert('Reset allows fresh reconnects', r2 === 2, r2, 2);
+});
+
+// DIRECTEDNESS VERDICT PARSER
+await section('Directed Verdict Parser', async () => {
+    for (const [reply, want] of [
+        ['YES', true],
+        ['yes', true],
+        ['Yes.', true],
+        ['YES, Miku', true],
+        ['NO', false],
+        ['no', false],
+        ['No.', false],
+        ['NO WAY', false],
+    ] as [string, boolean][]) {
+        assert(`Parse "${reply}"`, parseDirectedVerdict(reply) === want, parseDirectedVerdict(reply), want);
+    }
+    for (const reply of ['', '  ', 'maybe', 'YESNO', '???', 'OK']) {
+        assert(`Ambiguous "${reply}" -> null`, parseDirectedVerdict(reply) === null, parseDirectedVerdict(reply), null);
+    }
+
+    const p = buildDirectedSystemPrompt('is this for {botName}?', 'Miku');
+    assert('Prompt placeholder substituted', p.includes('Miku'), p);
+    assert('Prompt placeholder removed', !p.includes('{botName}'), p);
+    assert('Prompt passthrough without placeholder', buildDirectedSystemPrompt('hello', 'Miku') === 'hello');
+});
+
+// QUIZ DETECTION
+await section('Quiz Detection', async () => {
+    // Announce line with no question -> isQuiz, question null
+    let q = parseQuizLine('[21:42:38] [21:42] [QUIZ] HOURLY RANDOM QUESTION');
+    assert('Announce detected', q.isQuiz);
+    assert('Announce has no question', q.question === null, q.question, null);
+
+    // Announce + question on the same line -> question extracted
+    q = parseQuizLine('[21:42:38] [21:42] [QUIZ] HOURLY RANDOM QUESTION [21:42:38] [21:42] Which food is basically Minecraft premium health insurance?');
+    assert('Same-line question detected', q.isQuiz);
+    assert('Same-line question text', q.question === 'Which food is basically Minecraft premium health insurance?', q.question);
+
+    // Question-only line (no marker) -> not a quiz line
+    q = parseQuizLine('[21:42:38] [21:42] Which food is basically Minecraft premium health insurance?');
+    assert('Question-only is not quiz', !q.isQuiz);
+
+    // Non-quiz chat
+    q = parseQuizLine('hello there!');
+    assert('Plain chat not quiz', !q.isQuiz);
+
+    // Case-insensitive markers
+    q = parseQuizLine('[QUIZ] hourly random question Which block is lava?');
+    assert('Lowercase marker detected', q.isQuiz);
+    assert('Lowercase marker question', q.question === 'Which block is lava?', q.question);
+
+    // stripChatTimestamps
+    assert('Timestamps stripped', stripChatTimestamps('[21:42:38] [21:42] Hi there') === 'Hi there');
+    assert('Single timestamp stripped', stripChatTimestamps('[09:05] What?') === 'What?');
+    assert('No timestamp unchanged', stripChatTimestamps('plain text') === 'plain text');
+
+    // flattenChatComponent handles arrays + nested extra
+    const comp = {
+        extra: [
+            { text: '[21:42] ' },
+            {
+                extra: [
+                    { bold: true, text: 'HOURLY' },
+                    { text: ' RANDOM QUESTION' },
+                    { color: 'white', text: ' What is the answer?' },
+                ],
+            },
+        ],
+    };
+    assert('Array flatten', flattenChatComponent([comp, { text: ' [QUIZ]' }]) === '[21:42] HOURLY RANDOM QUESTION What is the answer? [QUIZ]');
+    assert('String passthrough', flattenChatComponent('x') === 'x');
+    assert('Null safe', flattenChatComponent(null) === '');
 });
 
 // TEMPLATE FORMATTING
@@ -127,6 +286,28 @@ await section('Edge Cases', async () => {
     assert('JUMP invalid defaults to 1', (parseAIReply('JUMP notanumber').actions[0] as any)?.amount === 1);
     assert('CROUCH negative clamped to 1', (parseAIReply('CROUCH -5').actions[0] as any)?.seconds === 1);
     assert('DROP_ALL has no extra fields', JSON.stringify(parseAIReply('DROP_ALL').actions[0]) === '{"type":"DROP_ALL"}');
+});
+
+// LOG FILE NAMING + FORMAT
+await section('Log File Naming + Format', async () => {
+    const now = new Date(2026, 7, 9, 14, 5, 7, 123); // Aug 9 2026 14:05:07.123
+    const name = buildRunFileName(now, 'GuraBott');
+    assert('Filename has date', name.startsWith('2026-08-09'), name);
+    assert('Filename has time', name.includes('14-05-07'), name);
+    assert('Filename has ms', name.includes('-123-'), name);
+    assert('Filename has username', name.endsWith('-GuraBott.log'), name);
+    assert('No colons (Windows-safe)', !name.includes(':'), name);
+
+    const safe = buildRunFileName(now, 'Player 42!');
+    assert('Username sanitized', safe.endsWith('-Player_42_.log'), safe);
+    assert('Empty username -> bot', buildRunFileName(now, '').endsWith('-bot.log'));
+    assert('undefined username -> bot', buildRunFileName(now, undefined as any).endsWith('-bot.log'));
+
+    const line = formatLogLine({ type: 'chat', text: 'hi "there" \n line2', ts: 42 });
+    assert('JSON round-trip', JSON.parse(line).text === 'hi "there" \n line2');
+    assert('Single physical line', line.split('\n').length === 2, line.split('\n').length, 2);
+    assert('Line ends with newline', line.endsWith('\n'));
+    assert('Retention keeps last 10', KEEP_LAST_N === 10, KEEP_LAST_N, 10);
 });
 
 console.log(`\n${'═'.repeat(52)}`);

@@ -7,11 +7,11 @@ import Mineflayer from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import Groq from 'groq-sdk';
 
-import { getRandom, parseChatMessage } from './utils.ts';
+import { getRandom, parseChatMessage, isTpaCommand, containsProfanity, extractTpaSender, sleep, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps } from './utils.ts';
 
 import { BotState, attachBot, getState, setState } from './modules/state.ts';
 import { addLog, pushTelemetry } from './core/store.ts';
-import { getAIResponse, clearHistory, type AIContext } from './modules/ai.ts';
+import { getAIResponse, clearHistory, isMessageDirected, getQuizAnswer, type AIContext } from './modules/ai.ts';
 import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
@@ -22,7 +22,7 @@ import { BotSession } from './session.ts';
 import { setBotHealthStatus } from './web.ts';
 import { startMcpServer, stopMcpServer } from './modules/mcp.ts';
 import { createCombatController, type CombatController } from './modules/combat.ts';
-import { getMode, resetMode } from './modules/mode.ts';
+import { getMode, resetMode, parseMode } from './modules/mode.ts';
 import { startWaterSurvival } from './modules/water.ts';
 import { HOSTILE_MOBS } from './constants.ts';
 import { loadJson } from './config.ts';
@@ -54,6 +54,11 @@ let isConnected = false;
 // Per-player "conversation window": mentioning the bot's username opens a
 // window of N follow-up replies (3–5). The bot stays quiet outside a window.
 const conversationBudget: Record<string, number> = {};
+// Hourly quiz: true while the "[QUIZ] HOURLY RANDOM QUESTION" announce has
+// been seen and the question line is still expected. quizAnswerLock prevents
+// two quiz replies from racing (announce + same-line question).
+let pendingQuizLine = false;
+let quizAnswerLock = false;
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 // Push a typed snapshot into the core store so any UI layer renders live
@@ -208,6 +213,27 @@ async function handleAIResponse(
     }
 }
 
+// ── Hourly quiz ────────────────────────────────────────────────────────────────
+// The server posts "[QUIZ] HOURLY RANDOM QUESTION" then a question (sometimes
+// on the same line). Answer via a short dedicated AI call — never routed
+// through the conversation/classifier sessions, so it can't pollute player
+// chat history or be gated by the directedness check.
+async function answerQuiz(question: string): Promise<void> {
+    if (!AI_ENABLED || !aiCtx) return;
+    if (quizAnswerLock) return;
+    quizAnswerLock = true;
+    try {
+        const answer = await getQuizAnswer(aiCtx, question);
+        if (answer && bot?.entity && (bot.health ?? 0) > 0) {
+            bot.chat(answer);
+        }
+    } catch (err: any) {
+        addLog('error', `[QUIZ] Failed: ${err?.message ?? err}`);
+    } finally {
+        quizAnswerLock = false;
+    }
+}
+
 // ── Disconnect ────────────────────────────────────────────────────────────────
 
 const disconnect = (): void => {
@@ -257,6 +283,20 @@ export function createBot(
         chimeDuration: PERSONALITY.aiSettings?.chimeDuration ?? '',
         glitchMessage: PERSONALITY.messages?.glitchVoice ?? 'Glitch!',
         maxHistoryPerPlayer: PERSONALITY.aiSettings?.conversionHistoryPerPlayer ?? 20,
+        directedCheck: (PERSONALITY as any).aiSettings?.directedCheck ?? {
+            enabled: true,
+            model: 'llama-3.1-8b-instant',
+            maxTokens: 5,
+            timeoutMs: 8000,
+            prompt: `You judge whether a Minecraft chat message is directed at the bot named {botName}. It is directed ONLY when the sender is clearly talking TO the bot: they use its name, ask it a direct question, give it an order, or reply to something the bot just said. Messages that only express the sender's own thoughts, problems, complaints, or chat between other players are NOT directed. When in doubt, answer NO. Reply with exactly YES or NO.`,
+        },
+        quiz: (PERSONALITY as any).aiSettings?.quiz ?? {
+            enabled: true,
+            model: 'llama-3.1-8b-instant',
+            maxTokens: 40,
+            timeoutMs: 12000,
+            prompt: `Answer this Minecraft trivia quiz question with ONE short answer (a single word or short phrase — the item or thing asked for). No explanation, no preamble, no markdown. If you are not sure, give your best guess.`,
+        },
     } : null;
 
     // MCP server — hosts an MCP endpoint so ANY AI (opencode, Claude, Cursor,
@@ -274,11 +314,15 @@ export function createBot(
     isEscapingStuck = false;
     lastHurtMessageTime = 0;
     aiDispatchLock = false;
+    pendingQuizLine = false;
+    quizAnswerLock = false;
     spawned = false;
     collecting.active = false;
     collecting.summary = {};
     for (const k of Object.keys(conversationBudget)) delete conversationBudget[k];
-    resetMode();
+    // Start every connection in the configured default mode (config.json
+    // `behaviorMode`, default 'idle').
+    resetMode(parseMode((CONFIG as any).behaviorMode));
 
     // Fresh session for this connection — the previous session's timers were
     // cleared by disconnect(). resetMovementSuppression() also clears any
@@ -316,6 +360,41 @@ export function createBot(
         username: config.username,
         version: (config as any).version || false,
     } as any);
+
+    // Every outgoing message goes through this wrapper: no code path (AI,
+    // commands, personality messages) can ever make the bot send a tpa
+    // command — neither an accept (/tpa accept, /tpaccept) nor a request
+    // (/tpa, /tpahere) — nor any message containing profanity.
+    //
+    // mineflayer injects its plugins (including `chat`) only after the
+    // connection's protocol version is resolved (the 'inject_allowed' event),
+    // so `bot.chat` is undefined synchronously after createBot(). Install the
+    // wrapper once injection completes; it fires after the chat plugin has
+    // run but before spawn, so all chat callers see the guarded version.
+    bot.once('inject_allowed', () => {
+        const rawChat = bot.chat.bind(bot);
+        // Serialized outbound queue: each send waits for the previous so rapid
+        // messages arrive in order instead of overlapping, and every message is
+        // delayed a bit by its length (plus a little jitter) to feel like it's
+        // being typed rather than instantly emitted. Scoped per-connection so a
+        // reconnect starts a fresh queue.
+        let sendQueue: Promise<void> = Promise.resolve();
+        bot.chat = ((message: string) => {
+        if (isTpaCommand(message)) {
+            addLog('warn', `[BOT] Blocked tpa command from being sent: ${message}`);
+            return;
+        }
+        if (containsProfanity(message)) {
+            addLog('warn', `[BOT] Blocked message containing profanity: ${message}`);
+            return;
+        }
+        const typingMs = typingDelayMs(message.length) + Math.random() * 200;
+        sendQueue = sendQueue.then(async () => {
+            await sleep(typingMs);
+            try { (rawChat as any)(message); } catch {}
+        });
+        }) as any;
+    });
 
     bot.loadPlugin(baritonePlugin.loader);
     attachBot(bot);
@@ -391,6 +470,9 @@ export function createBot(
         isConnected = true;
         pushBotTelemetry();
         addLog('system', `[BOT] Connected to ${config.ip}:${config.port} as ${config.username}`);
+        // Respect the greeting toggle: when disabled, don't blurt the
+        // "joining" line right after connecting (mirrors playerJoined).
+        if (CONFIG.greeting === false) return;
         if (AI_ENABLED) {
             const loginMsg = (PERSONALITY as any).messages?.login;
             if (loginMsg && session) {
@@ -475,9 +557,45 @@ export function createBot(
     bot.on('message', async (jsonMsg: any) => {
         const parsed = parseChatMessage(jsonMsg, bot.username);
         if (!parsed) {
+            // Hourly quiz: "[QUIZ] HOURLY RANDOM QUESTION" announce, possibly
+            // followed by the question on the same line (else it arrives as the
+            // next chat line). Answer without touching conversation history.
+            const flat = flattenChatComponent(jsonMsg);
+            const quiz = parseQuizLine(flat);
+            if (quiz.isQuiz) {
+                if (quiz.question) {
+                    void answerQuiz(quiz.question);
+                } else {
+                    pendingQuizLine = true;
+                    addLog('system', '[QUIZ] Question announced — awaiting question line');
+                }
+                return;
+            }
+            if (pendingQuizLine && flat.trim()) {
+                pendingQuizLine = false;
+                const q = stripChatTimestamps(flat);
+                if (q) { void answerQuiz(q); return; }
+            }
+
             // Only surface genuinely-unparseable third-party chat — the bot's
             // own messages (and join banners etc.) are filtered out silently.
             const raw = JSON.stringify(jsonMsg) ?? '';
+            // TPA request: the server sends a clickable "/tpaccept" prompt.
+            // Politely decline and NEVER accept — the click command is never
+            // run, and the outgoing-chat guard blocks any tpa command.
+            if (raw.includes('/tpaccept')) {
+                if (bot?.entity && (bot.health ?? 0) > 0) {
+                    const sender = extractTpaSender(raw);
+                    addLog('system', `[BOT] TPA request${sender ? ` from ${sender}` : ''} declined`);
+                    const template: string = (PERSONALITY as any).messages?.tpaDecline
+                        ?? "{player}, I don't accept tpa but thanks for wanting to be with me!";
+                    const reply = sender
+                        ? template.replace('{player}', sender)
+                        : template.replace(/\{player\}[,\s]*/i, '');
+                    try { bot.chat(reply); } catch {}
+                }
+                return;
+            }
             if (!raw.toLowerCase().includes(bot.username.toLowerCase())) {
                 addLog('warn', `[CHAT] unparsed: ${raw.slice(0, 400)}`);
             }
@@ -500,30 +618,47 @@ export function createBot(
 
         const botName = bot.username.toLowerCase();
         const msgLower = message.toLowerCase();
-
-        // Conversation window model: the bot only talks via AI after someone
-        // mentions its username. That opens a window of 3-5 follow-up replies
-        // to the same player, then it goes quiet until mentioned again.
-        // (A mention ALWAYS responds, even mid-task.)
-
-        // Direct mention — open/refresh the window and respond
-        if (msgLower.includes(botName)) {
-            conversationBudget[username] = 3 + Math.floor(Math.random() * 3);
-            await handleAIResponse(username, message, 'mentioned').catch(err => {
-                addLog('error', `[BOT] AI mention response failed: ${err?.message ?? err}`);
-            });
-            return;
-        }
-
-        // Inside an open window: keep the conversation going for this player
+        const nameMentioned = msgLower.includes(botName);
         const budget = conversationBudget[username] ?? 0;
-        if (budget > 0) {
-            conversationBudget[username] = budget - 1;
-            await handleAIResponse(username, message, 'solo').catch(err => {
-                addLog('error', `[BOT] AI follow-up response failed: ${err?.message ?? err}`);
-            });
+        const windowOpen = budget > 0;
+
+        // Two-session AI model:
+        //   A message that names the bot is ALWAYS directed — a name call-out
+        //   must never be ignored, so it short-circuits without a classifier
+        //   call (also keeps the gate from wrongly rejecting "miku say...").
+        //   Only messages WITHOUT the name go through Session 2 (classifier),
+        //   which decides if e.g. "hello!" is aimed at the bot. Only a YES
+        //   reaches Session 1 (conversation). A NO never consumes the window,
+        //   so bystander chat can't shrink it.
+        //   If the classifier has no opinion (disabled / rate-limited / error)
+        //   we fall back to the old heuristic: open window.
+        let directed: boolean | null;
+        if (nameMentioned) {
+            directed = true;
+        } else if (AI_ENABLED && aiCtx) {
+            directed = await isMessageDirected(aiCtx, bot.username, username, message);
+        } else {
+            directed = null;
+        }
+        const shouldReply = directed ?? windowOpen;
+
+        if (!shouldReply) {
+            addLog('chat', `[AI] "${message.slice(0, 40)}" not directed at the bot — ignored`);
             return;
         }
+
+        // Open/refresh the window on any directed opener (mention or not);
+        // shrink it on directed follow-ups inside an existing window.
+        if (nameMentioned || !windowOpen) {
+            conversationBudget[username] = 3 + Math.floor(Math.random() * 3);
+        } else {
+            conversationBudget[username] = budget - 1;
+        }
+
+        await handleAIResponse(username, message, nameMentioned ? 'mentioned' : 'solo').catch(err => {
+            addLog('error', `[BOT] AI response failed: ${err?.message ?? err}`);
+        });
+        return;
     });
 
     // ── Spawn ────────────────────────────────────────────────────────────────

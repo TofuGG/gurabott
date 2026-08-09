@@ -4,9 +4,9 @@
   "name": "gurabot",
   "version": "1.0.0",
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning --max-old-space-size=400\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs ./src/index.ts",
-    "dev": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe --inspect node_modules/tsx/dist/cli.mjs ./src/index.ts",
-    "test": "cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test.mts && cross-env NODE_OPTIONS=\"--experimental-ffi --disable-warning=ExperimentalWarning\" node-runtime\\node-v26.6.0-win-x64\\node.exe node_modules/tsx/dist/cli.mjs src/test-ui.tsx"
+    "start": "node scripts/run.mjs ./src/index.ts",
+    "dev": "node scripts/run.mjs --inspect ./src/index.ts",
+    "test": "node scripts/run.mjs src/test.mts && node scripts/run.mjs src/test-ui.tsx"
   },
   "dependencies": {
     "@miner-org/mineflayer-baritone": "^4.5.1",
@@ -30,7 +30,6 @@
   "license": "ISC",
   "description": "> A powerful, customizable Minecraft bot with AI personality, advanced pathfinding, and complete command automation. **No Groq API? No problem** - use as a pure command-based bot!",
   "devDependencies": {
-    "cross-env": "^10.1.0",
     "typescript": "^5.9.3"
   },
   "repository": {
