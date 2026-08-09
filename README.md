@@ -3,7 +3,7 @@
 > A powerful, customizable Minecraft bot with AI personality, advanced pathfinding, and complete command automation. **No Groq API? No problem** - use as a pure command-based bot!
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
-![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)
+![Node.js](https://img.shields.io/badge/Node.js-26.6%2B-green)
 ![Minecraft](https://img.shields.io/badge/Minecraft-Java%20Edition-red)
 
 ---
@@ -119,7 +119,7 @@ Switching to `gidle` cancels any active combat/flee immediately.
 ## 🚀 Quick Start
 
 ### Requirements
-- **Node.js** 18+ (the OpenTUI UI needs **Node ≥ 26** with `node:ffi`, see "Runtime" below)
+- **Node.js** 26.6+ (OpenTUI's UI needs the experimental `node:ffi` module, see "Runtime" below)
 - **npm** or **pnpm**
 - Minecraft Java Edition server
 - *Optional:* Groq API key (for AI features)
