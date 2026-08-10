@@ -2,7 +2,7 @@
 import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
 import { parseMode } from './modules/mode.ts';
 import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from './modules/ai.ts';
-import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar } from './utils.ts';
+import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
 
@@ -275,6 +275,60 @@ await section('Quiz Detection', async () => {
     assert('Array flatten', flattenChatComponent([comp, { text: ' [QUIZ]' }]) === '[21:42] HOURLY RANDOM QUESTION What is the answer? [QUIZ]');
     assert('String passthrough', flattenChatComponent('x') === 'x');
     assert('Null safe', flattenChatComponent(null) === '');
+});
+
+// CHAT CHICKEN DETECTION
+// Replays the real server sequences captured in the logs. Feed lines one at a
+// time like the message handler does; a non-null `word` is what gets typed.
+await section('Chat Chicken Detection', async () => {
+    // Round 1: word was "SKIBIDI" (2026-08-10-10-40 log).
+    let st = INITIAL_CHICKEN_STATE;
+    let out = handleChatChicken(st, '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    st = out.state;
+    assert('Separator ignored', out.word === null, out.word, null);
+    out = handleChatChicken(st, '🐔 CHAT CHICKEN 🐔');
+    st = out.state;
+    assert('Banner header arms capture', st.bannerSeen && !st.awaitingWord, st);
+    assert('Banner yields no word', out.word === null, out.word, null);
+    out = handleChatChicken(st, 'Type:');
+    st = out.state;
+    assert('Type: arms word wait', st.awaitingWord, st);
+    out = handleChatChicken(st, '');
+    st = out.state;
+    assert('Blank line keeps waiting', st.awaitingWord, st);
+    out = handleChatChicken(st, 'SKIBIDI');
+    st = out.state;
+    assert('Word captured', out.word === 'SKIBIDI', out.word, 'SKIBIDI');
+    assert('State reset after capture', !st.bannerSeen && !st.awaitingWord, st);
+
+    // Round 2: word was literally "CHICKEN" (2026-08-10-11-13 log) — the word
+    // must NOT be confused with the banner header.
+    st = INITIAL_CHICKEN_STATE;
+    for (const line of ['🐔 CHAT CHICKEN 🐔', 'Type:', '', 'CHICKEN']) {
+        out = handleChatChicken(st, line);
+        st = out.state;
+    }
+    assert('CHICKEN-as-word captured', out.word === 'CHICKEN', out.word, 'CHICKEN');
+
+    // Countdown lines must never re-arm capture or be mistaken for words.
+    st = INITIAL_CHICKEN_STATE;
+    out = handleChatChicken(st, "[CHAT CHICKEN] Don't be scared... 🐔");
+    st = out.state;
+    assert('Countdown line not a banner', !st.bannerSeen, st);
+    out = handleChatChicken(st, '[CHAT CHICKEN] Tick...');
+    assert('Tick line yields nothing', out.word === null, out.word, null);
+
+    // Timestamps on the word line are stripped.
+    st = INITIAL_CHICKEN_STATE;
+    for (const line of ['🐔 CHAT CHICKEN 🐔', 'Type:', '[09:05] POPIPO']) {
+        out = handleChatChicken(st, line);
+        st = out.state;
+    }
+    assert('Timestamps stripped from word', out.word === 'POPIPO', out.word, 'POPIPO');
+
+    // A standalone "Type:" without a banner does nothing.
+    out = handleChatChicken(INITIAL_CHICKEN_STATE, 'Type:');
+    assert('Bare Type: ignored', !out.state.awaitingWord && out.word === null, out.state);
 });
 
 // TEMPLATE FORMATTING

@@ -60,6 +60,20 @@ function formatMsg(template: string, vars: Record<string, string>): string {
     return out;
 }
 
+// Command results are reported to the TUI log feed only — never to Minecraft
+// chat. This keeps gameplay chat clean; the operator follows every command's
+// response in the terminal instead.
+function reply(message: string): void {
+    addLog('chat', message);
+}
+
+// Send a message to Minecraft chat AND surface it in the TUI log feed, so the
+// operator sees exactly what the bot said (used by gsay / gtp).
+function say(bot: Bot, message: string): void {
+    addLog('chat', message);
+    bot.chat(message);
+}
+
 // ── Command registry ──────────────────────────────────────────────────────────
 
 type CommandFn = (ctx: CommandContext, username: string, args: string[], ctxAgain?: CommandContext) => Promise<void>;
@@ -67,7 +81,7 @@ type CommandFn = (ctx: CommandContext, username: string, args: string[], ctxAgai
 const commands: Record<string, CommandFn> = {
 
     async gping({ bot }) {
-        bot.chat(`Pong! ${bot.player?.ping ?? '?'}ms`);
+        reply(`Pong! ${bot.player?.ping ?? '?'}ms`);
     },
 
     async ghelp({ bot, personality }) {
@@ -79,43 +93,38 @@ const commands: Record<string, CommandFn> = {
         ];
         for (const line of helpMessages) {
             await sleep(getRandomDelay(500, 900));
-            try { bot.chat(line); } catch {}
+            try { reply(line); } catch {}
         }
     },
 
     async gsay({ bot }, _username, args) {
-        if (args.length === 0) { bot.chat('Usage: gsay <message>'); return; }
-        bot.chat(args.join(' '));
+        if (args.length === 0) { reply('Usage: gsay <message>'); return; }
+        say(bot, args.join(' '));
     },
 
     async ginv({ bot, personality }) {
         const items = bot.inventory.items();
-        bot.chat(items.length === 0 ? personality.messages.emptyInventory : `${items.length} items`);
+        if (items.length === 0) { reply(personality.messages.emptyInventory); return; }
+        reply(items.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join('\n'));
     },
 
     async ginvsee({ bot, personality }) {
         const items = bot.inventory.items();
-        if (!items || items.length === 0) { bot.chat(personality.messages.emptyInventory); return; }
-        // Truncate to avoid exceeding Minecraft's 256-char chat limit
-        const lines = items.map((item, idx) => `${idx + 1}. ${item.name ?? 'unknown'} x${item.count ?? 0}`);
-        let msg = lines[0] ?? '';
-        for (let i = 1; i < lines.length; i++) {
-            const next = msg + ', ' + lines[i];
-            if (next.length > 240) { msg += `... +${lines.length - i} more`; break; }
-            msg = next;
-        }
-        bot.chat(msg);
+        if (!items || items.length === 0) { reply(personality.messages.emptyInventory); return; }
+        // TUI-only output — no Minecraft 256-char limit, so every item gets its
+        // own line.
+        reply(items.map((item, idx) => `${idx + 1}. ${item.name ?? 'unknown'} x${item.count ?? 0}`).join('\n'));
     },
 
     async geat({ bot, personality }, _username, args) {
-        if (getState() !== BotState.IDLE) { bot.chat(personality.messages.busy); return; }
+        if (getState() !== BotState.IDLE) { reply(personality.messages.busy); return; }
 
         const eatItems = bot.inventory.items();
 
         if (args.length === 0) {
-            if (eatItems.length === 0) { bot.chat(personality.messages.noFood); return; }
-            bot.chat(eatItems.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join(', '));
-            bot.chat('Usage: geat <food_number> <amount>');
+            if (eatItems.length === 0) { reply(personality.messages.noFood); return; }
+            reply(eatItems.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join('\n'));
+            reply('Usage: geat <food_number> <amount>');
             return;
         }
 
@@ -123,7 +132,7 @@ const commands: Record<string, CommandFn> = {
         const amount = Math.max(1, parseInt(args[1], 10) || 1);
 
         if (Number.isNaN(foodIdx) || foodIdx < 0 || foodIdx >= eatItems.length) {
-            bot.chat(personality.messages.invalidFoodNumber);
+            reply(personality.messages.invalidFoodNumber);
             return;
         }
 
@@ -137,10 +146,10 @@ const commands: Record<string, CommandFn> = {
                 await bot.consume();
                 eaten++;
                 await sleep(500);
-                if (bot.food >= 20) { bot.chat(personality.messages.fullStomach); break; }
+                if (bot.food >= 20) { reply(personality.messages.fullStomach); break; }
             }
-            bot.chat(`Ate ${eaten} ${food.name}`);
-        } catch { bot.chat(personality.messages.couldntEat); }
+            reply(`Ate ${eaten} ${food.name}`);
+        } catch { reply(personality.messages.couldntEat); }
         finally { setState(BotState.IDLE); }
     },
 
@@ -157,23 +166,23 @@ const commands: Record<string, CommandFn> = {
     async gdrop({ bot, personality }, _username, args) {
         const dropItems = bot.inventory.items();
         if (args.length === 0) {
-            if (dropItems.length === 0) { bot.chat(personality.messages.nothingToDrop); return; }
-            bot.chat(dropItems.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join(', '));
-            bot.chat('Usage: gdrop <item_number> <amount>');
+            if (dropItems.length === 0) { reply(personality.messages.nothingToDrop); return; }
+            reply(dropItems.map((item, idx) => `${idx + 1}. ${item.name} x${item.count}`).join(', '));
+            reply('Usage: gdrop <item_number> <amount>');
             return;
         }
         const itemIdx = parseInt(args[0], 10) - 1;
         const amount = parseInt(args[1], 10) || 1;
         if (isNaN(itemIdx) || itemIdx < 0 || itemIdx >= dropItems.length) {
-            bot.chat(personality.messages.invalidItemNumber);
+            reply(personality.messages.invalidItemNumber);
             return;
         }
         const item = dropItems[itemIdx];
         if (amount > item.count) {
-            bot.chat(formatMsg(personality.messages.onlyHave, { count: String(item.count), item: item.name }));
+            reply(formatMsg(personality.messages.onlyHave, { count: String(item.count), item: item.name }));
             return;
         }
-        bot.chat(formatMsg(personality.messages.droppingItems, { amount: String(amount), item: item.name }));
+        reply(formatMsg(personality.messages.droppingItems, { amount: String(amount), item: item.name }));
         await bot.toss(item.type, null, Math.min(amount, item.count));
     },
 
@@ -192,13 +201,13 @@ const commands: Record<string, CommandFn> = {
 
     async gcords({ bot }) {
         const pos = bot.entity?.position;
-        if (!pos) { bot.chat('Unknown position'); return; }
-        bot.chat(`${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}`);
+        if (!pos) { reply('Unknown position'); return; }
+        reply(`${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}`);
     },
 
     async gtp({ bot }, _username, args) {
         const [x, y, z] = args;
-        if (!x || !y || !z) { bot.chat('Usage: gtp <x> <y> <z>'); return; }
+        if (!x || !y || !z) { reply('Usage: gtp <x> <y> <z>'); return; }
 
         const onMessage = (jsonMsg: any) => {
             const msg = jsonMsg.toString();
@@ -206,18 +215,18 @@ const commands: Record<string, CommandFn> = {
                 msg.includes('Unknown command') || msg.includes('no permission') ||
                 msg.includes('not a valid number') || msg.includes('cannot be found')
             ) {
-                bot.chat('No permission for /tp.');
+                reply('No permission for /tp.');
                 bot.removeListener('message', onMessage);
             }
         };
         bot.once('message', onMessage);
-        bot.chat(`/tp ${bot.username} ${x} ${y} ${z}`);
+        say(bot, `/tp ${bot.username} ${x} ${y} ${z}`);
         setTimeout(() => bot.removeListener('message', onMessage), 3000);
     },
 
     async gfollow({ bot, personality, configureBaritone }, username, args) {
         let targetName = args[0];
-        if (!targetName) { bot.chat('Usage: gfollow <player>'); return; }
+        if (!targetName) { reply('Usage: gfollow <player>'); return; }
         if (targetName.toLowerCase() === 'me') targetName = username;
 
         // Never hijack a task that owns movement (combat/collect/eat/sleep/
@@ -225,19 +234,19 @@ const commands: Record<string, CommandFn> = {
         // state leaves the combat attack interval running against the wrong
         // target. FOLLOWING is allowed so you can switch follow targets.
         if (BUSY_STATES.includes(getState())) {
-            bot.chat(personality.messages.busy);
+            reply(personality.messages.busy);
             return;
         }
 
         const playerEntity = bot.players[targetName]?.entity;
         if (!playerEntity) {
-            bot.chat(formatMsg(personality.messages.cantSeePlayer, { player: targetName }));
+            reply(formatMsg(personality.messages.cantSeePlayer, { player: targetName }));
             return;
         }
         // Stop any existing navigation before starting follow
         try { bot.ashfinder.stop(); } catch {}
         setState(BotState.FOLLOWING);
-        bot.chat(formatMsg(personality.messages.followingPlayer, { player: targetName }));
+        reply(formatMsg(personality.messages.followingPlayer, { player: targetName }));
         configureBaritone();
 
         // baritone's followEntity never resolves or rejects when the followed
@@ -249,7 +258,7 @@ const commands: Record<string, CommandFn> = {
             try { bot.ashfinder.stop(); } catch {}
             if (getState() === BotState.FOLLOWING) {
                 setState(BotState.IDLE);
-                bot.chat(personality.messages.stoppedFollowing);
+                reply(personality.messages.stoppedFollowing);
             }
         };
         bot.on('playerLeft', onTargetLeft);
@@ -262,48 +271,48 @@ const commands: Record<string, CommandFn> = {
     async gsfollow({ bot, personality }) {
         if (getState() === BotState.FOLLOWING) {
             setState(BotState.IDLE);
-            bot.chat(personality.messages.stoppedFollowing);
+            reply(personality.messages.stoppedFollowing);
         } else {
-            bot.chat(personality.messages.notFollowing);
+            reply(personality.messages.notFollowing);
         }
     },
 
     async gcraft({ bot, personality }, _username, args) {
         const itemName = args[0];
-        if (!itemName) { bot.chat('Usage: gcraft <item_name>'); return; }
+        if (!itemName) { reply('Usage: gcraft <item_name>'); return; }
 
         const mcData = minecraftData(bot.version);
         const item = mcData.itemsByName[itemName];
         if (!item) {
-            bot.chat(formatMsg(personality.messages.unknownItem, { item: itemName }));
+            reply(formatMsg(personality.messages.unknownItem, { item: itemName }));
             return;
         }
         const recipe = bot.recipesFor(item.id, null, 1, null)[0];
         if (!recipe) {
-            bot.chat(formatMsg(personality.messages.unknownItem, { item: itemName }));
+            reply(formatMsg(personality.messages.unknownItem, { item: itemName }));
             return;
         }
 
         let craftingTable = null;
         if (recipe.requiresTable) {
             const tableId = mcData.blocksByName.crafting_table?.id;
-            if (!tableId) { bot.chat(personality.messages.noCraftingTable); return; }
+            if (!tableId) { reply(personality.messages.noCraftingTable); return; }
             craftingTable = bot.findBlock({ matching: tableId, maxDistance: 6 });
-            if (!craftingTable) { bot.chat(personality.messages.noCraftingTable); return; }
+            if (!craftingTable) { reply(personality.messages.noCraftingTable); return; }
         }
 
         try {
             await bot.craft(recipe, 1, craftingTable ?? undefined);
-            bot.chat(formatMsg(personality.messages.craftedItem, { item: itemName }));
+            reply(formatMsg(personality.messages.craftedItem, { item: itemName }));
         } catch (err: any) {
-            bot.chat(formatMsg(personality.messages.craftFailed, { error: err?.message ?? 'unknown' }));
+            reply(formatMsg(personality.messages.craftFailed, { error: err?.message ?? 'unknown' }));
         }
     },
 
     async gdump({ bot, personality }) {
         const items = bot.inventory.items();
-        if (items.length === 0) { bot.chat(personality.messages.nothingToDrop); return; }
-        bot.chat(personality.messages.droppingEverything);
+        if (items.length === 0) { reply(personality.messages.nothingToDrop); return; }
+        reply(personality.messages.droppingEverything);
         for (const item of items) {
             try {
                 await bot.tossStack(item);
@@ -314,13 +323,13 @@ const commands: Record<string, CommandFn> = {
 
     async gkill({ bot, personality, intervals }, _username, args) {
         const killTarget = args[0]?.toLowerCase();
-        if (!killTarget) { bot.chat('Usage: gkill <mob|player name>'); return; }
+        if (!killTarget) { reply('Usage: gkill <mob|player name>'); return; }
 
         // Same gate as gfollow: don't stomp a task that owns movement. A gkill
         // issued during auto-combat would stop combat's follow path and spin up
         // a second attack interval fighting for the same target.
         if (BUSY_STATES.includes(getState())) {
-            bot.chat(personality.messages.busy);
+            reply(personality.messages.busy);
             return;
         }
 
@@ -334,12 +343,12 @@ const commands: Record<string, CommandFn> = {
         const playerEntity = playerEntry?.entity;
 
         if (playerEntry && !playerEntity) {
-            bot.chat(formatMsg(personality.messages.cantSeePlayer, { player: playerEntry.username }));
+            reply(formatMsg(personality.messages.cantSeePlayer, { player: playerEntry.username }));
             return;
         }
 
         if (playerEntity) {
-            bot.chat(formatMsg(personality.messages.attackingPlayer, { player: playerEntry.username }));
+            reply(formatMsg(personality.messages.attackingPlayer, { player: playerEntry.username }));
             if (weapon && bot.heldItem?.name !== weapon.name) {
                 try { await bot.equip(weapon, 'hand'); } catch {}
             }
@@ -354,7 +363,7 @@ const commands: Record<string, CommandFn> = {
                     if (idx !== -1) intervals.splice(idx, 1);
                     bot.ashfinder.stop();
                     setState(BotState.IDLE);
-                    bot.chat(formatMsg(personality.messages.playerGone, { player: playerEntry.username }));
+                    reply(formatMsg(personality.messages.playerGone, { player: playerEntry.username }));
                     return;
                 }
                 try { bot.attack(stillExists); } catch {}
@@ -369,7 +378,7 @@ const commands: Record<string, CommandFn> = {
         );
 
         if (mobEntity) {
-            bot.chat(formatMsg(personality.messages.attackingMob, { mob: killTarget }));
+            reply(formatMsg(personality.messages.attackingMob, { mob: killTarget }));
             if (weapon && bot.heldItem?.name !== weapon.name) {
                 try { await bot.equip(weapon, 'hand'); } catch {}
             }
@@ -384,7 +393,7 @@ const commands: Record<string, CommandFn> = {
                     if (idx !== -1) intervals.splice(idx, 1);
                     bot.ashfinder.stop();
                     setState(BotState.IDLE);
-                    bot.chat(formatMsg(personality.messages.mobDead, { mob: killTarget }));
+                    reply(formatMsg(personality.messages.mobDead, { mob: killTarget }));
                     return;
                 }
                 try { bot.attack(stillExists); } catch {}
@@ -393,36 +402,36 @@ const commands: Record<string, CommandFn> = {
             return;
         }
 
-        bot.chat(formatMsg(personality.messages.cantFindTarget, { target: killTarget }));
+        reply(formatMsg(personality.messages.cantFindTarget, { target: killTarget }));
     },
 
     async glast({ bot, personality }, _username, _args, ctx) {
         // lastPlayerJoined is passed via ctx binding
         const last = ctx?.lastPlayerJoined();
-        bot.chat(last
+        reply(last
             ? formatMsg(personality.messages.lastPlayerJoined, { player: last })
             : personality.messages.nobodyJoined
         );
     },
 
     async gsleep({ bot, personality, configureBaritone }) {
-        if (getState() !== BotState.IDLE) { bot.chat(personality.messages.busy); return; }
+        if (getState() !== BotState.IDLE) { reply(personality.messages.busy); return; }
 
         const bed = bot.findBlock({
             matching: (block) => block?.name?.endsWith('_bed') && block.metadata === 0,
             maxDistance: 32,
         });
-        if (!bed) { bot.chat(personality.messages.noBedNearby); return; }
+        if (!bed) { reply(personality.messages.noBedNearby); return; }
         const bedDist = bot.entity.position.distanceTo(bed.position);
         addLog('system', `[CMD] gsleep — bed at ${bed.position.floored()} (${Math.round(bedDist)} blocks)`);
         if (bot.entity.position.distanceTo(bed.position) > 12) {
-            bot.chat(personality.messages.bedTooFar);
+            reply(personality.messages.bedTooFar);
             return;
         }
 
         setState(BotState.SLEEPING);
         try {
-            bot.chat(personality.messages.goingToSleep);
+            reply(personality.messages.goingToSleep);
             configureBaritone();
             try {
                 await safeGoto(
@@ -431,17 +440,17 @@ const commands: Record<string, CommandFn> = {
                     12000,
                 );
             } catch {
-                bot.chat(personality.messages.cantReachBed);
+                reply(personality.messages.cantReachBed);
                 setState(BotState.IDLE);
                 return;
             }
             await bot.sleep(bed);
         } catch (err: any) {
             const msg = err?.message?.toLowerCase?.() ?? '';
-            if (msg.includes('day'))      bot.chat(personality.messages.notNight);
-            else if (msg.includes('monster')) bot.chat(personality.messages.monstersNearby);
-            else if (msg.includes('obstructed')) bot.chat(personality.messages.bedBlocked);
-            else bot.chat(personality.messages.cantSleep);
+            if (msg.includes('day'))      reply(personality.messages.notNight);
+            else if (msg.includes('monster')) reply(personality.messages.monstersNearby);
+            else if (msg.includes('obstructed')) reply(personality.messages.bedBlocked);
+            else reply(personality.messages.cantSleep);
         } finally {
             try { bot.ashfinder.stop(); } catch {}
             setState(BotState.IDLE);
@@ -453,7 +462,7 @@ const commands: Record<string, CommandFn> = {
             matching: (block) => DOOR_NAMES.includes(block.name),
             maxDistance: 16,
         });
-        if (!door) { bot.chat(personality.messages.noDoorNearby); return; }
+        if (!door) { reply(personality.messages.noDoorNearby); return; }
         addLog('system', `[CMD] gopendoor — found ${door.name} at ${door.position.floored()}`);
 
         try {
@@ -467,12 +476,12 @@ const commands: Record<string, CommandFn> = {
             if (!freshDoor) return;
             const openVal = freshDoor.getProperties?.()?.['open'];
             if (openVal === 'true' || openVal === true) {
-                bot.chat(personality.messages.doorAlreadyOpen);
+                reply(personality.messages.doorAlreadyOpen);
                 return;
             }
             await bot.activateBlock(freshDoor);
-            bot.chat(personality.messages.doorOpened);
-        } catch { bot.chat(personality.messages.cantReachDoor); }
+            reply(personality.messages.doorOpened);
+        } catch { reply(personality.messages.cantReachDoor); }
     },
 
     async gcollect({ bot, personality, configureBaritone, collecting }, _username, args) {
@@ -480,11 +489,11 @@ const commands: Record<string, CommandFn> = {
         const amount = Math.max(1, parseInt(args[1], 10) || 2);
 
         if (!resourceType || !RESOURCE_GROUPS[resourceType]) {
-            bot.chat('Usage: gcollect <wood|stone|dirt> <amount>');
+            reply('Usage: gcollect <wood|stone|dirt> <amount>');
             return;
         }
 
-        if (getState() !== BotState.IDLE) { bot.chat(personality.messages.busy); return; }
+        if (getState() !== BotState.IDLE) { reply(personality.messages.busy); return; }
 
         addLog('system', `[CMD] gcollect resource="${resourceType}" amount=${amount}`);
 
@@ -616,7 +625,7 @@ const commands: Record<string, CommandFn> = {
         collecting.active = true;
         collecting.summary = {};
 
-        bot.chat(formatMsg(personality.messages.collectingResource, {
+        reply(formatMsg(personality.messages.collectingResource, {
             amount: String(amount), resource: resourceType,
         }));
 
@@ -645,9 +654,9 @@ const commands: Record<string, CommandFn> = {
 
         if ((getState() as BotState) === BotState.COLLECTING) {
             if (totalCollected === 0) {
-                bot.chat(formatMsg(personality.messages.couldntFindResource, { resource: resourceType }));
+                reply(formatMsg(personality.messages.couldntFindResource, { resource: resourceType }));
             } else {
-                bot.chat(formatMsg(personality.messages.gotResource, {
+                reply(formatMsg(personality.messages.gotResource, {
                     amount: String(totalCollected), resource: resourceType,
                 }));
             }
@@ -658,7 +667,7 @@ const commands: Record<string, CommandFn> = {
     },
 
     async gscollect({ bot, personality, collecting }) {
-        if (!collecting.active) { bot.chat(personality.messages.notCollecting); return; }
+        if (!collecting.active) { reply(personality.messages.notCollecting); return; }
         collecting.active = false;
         setState(BotState.IDLE);
 
@@ -666,7 +675,7 @@ const commands: Record<string, CommandFn> = {
             .map(([type, count]) => `${count} ${type.replace(/_/g, ' ')}`)
             .join(', ');
 
-        bot.chat(formatMsg(personality.messages.stoppedCollecting, {
+        reply(formatMsg(personality.messages.stoppedCollecting, {
             collected: summary || 'nothing',
         }));
         collecting.summary = {};
@@ -675,14 +684,14 @@ const commands: Record<string, CommandFn> = {
         const sub = args[0]?.toLowerCase();
         if (sub === 'stop') {
             stopSurv();
-            bot.chat('Survival mode stopping...');
+            reply('Survival mode stopping...');
         } else {
             // accepts: gsurv  OR  gsurv start
             if (isSurvRunning()) {
                 addLog('warn', '[SURV] Already running — use "gsurv stop" to stop');
-                bot.chat('Survival already active! Use "gsurv stop" to stop.');
+                reply('Survival already active! Use "gsurv stop" to stop.');
             } else {
-                bot.chat('▶ Starting survival mode...');
+                reply('▶ Starting survival mode...');
                 startSurv(bot, configureBaritone, session);
             }
         }
@@ -716,7 +725,7 @@ const commands: Record<string, CommandFn> = {
             attack: 'ATTACK (hunt hostiles)',
             free: 'FREE (decide based on the situation)',
         };
-        bot.chat(`Mode: ${labels[m]}`);
+        reply(`Mode: ${labels[m]}`);
     },
 
     async greset({ bot }, username) {
@@ -728,7 +737,7 @@ const commands: Record<string, CommandFn> = {
         }
         clearAllHistory();
         addLog('system', '[RESET] Cleared all AI conversation context');
-        try { bot.chat('Context wiped! What were we talking about? Popipo~'); } catch {}
+        try { reply('Context wiped! What were we talking about? Popipo~'); } catch {}
     },
 
     async gfilter(_ctx, username, args) {
@@ -769,21 +778,8 @@ const commands: Record<string, CommandFn> = {
             return teamName ? `${name} [${teamName}] ${ping}` : `${name} ${ping}`;
         }).sort((a, b) => a.localeCompare(b));
 
-        const lines: string[] = [];
-        let line = '';
-        for (const row of rows) {
-            const next = line ? `${line}, ${row}` : row;
-            if (next.length > 240) {
-                if (line) lines.push(line);
-                line = row;
-            } else {
-                line = next;
-            }
-        }
-        if (line) lines.push(line);
-
         addLog('system', `[TAB] ${players.length} player${players.length === 1 ? '' : 's'} online`);
-        for (const l of lines) addLog('system', `[TAB] ${l}`);
+        for (const row of rows) addLog('system', `[TAB] ${row}`);
     },
 };
 

@@ -61,6 +61,8 @@ async function main() {
 
     await tui.initTUI({
         onCommand: async (cmd: string, args: string[]) => {
+            const fullCmd = [cmd, ...args].join(' ');
+            addLog('system', `[SHELL] ${fullCmd}`);
             if (cmd === 'quit' || cmd === 'exit') {
                 await shutdown();
                 return;
@@ -72,7 +74,6 @@ async function main() {
 
             const ctx = getBotCommandCtx();
             if (!ctx) { addLog('warn', 'Bot not connected yet'); return; }
-            const fullCmd = [cmd, ...args].join(' ');
             await handleCommand(ctx, 'Shell', fullCmd);
         },
         onExit: shutdown,

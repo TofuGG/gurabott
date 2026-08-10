@@ -180,6 +180,39 @@ export function parseQuizLine(flat: string): { isQuiz: boolean; question: string
     return { isQuiz: true, question: cleaned || null };
 }
 
+// ── Chat chicken detection ────────────────────────────────────────────────────
+// The server's "CHAT CHICKEN" bomb game: the banner announces a word (a line
+// right after "Type:") that the LAST player to say before the explosion wins.
+// Feed every unparsed chat line through the state machine; when it returns a
+// non-null `word`, the caller should type it into chat.
+
+export interface ChickenState {
+    bannerSeen: boolean;
+    awaitingWord: boolean;
+}
+
+export const INITIAL_CHICKEN_STATE: ChickenState = { bannerSeen: false, awaitingWord: false };
+
+export function handleChatChicken(
+    state: ChickenState,
+    flat: string,
+): { state: ChickenState; word: string | null } {
+    const line = stripChatTimestamps(flat);
+    if (state.awaitingWord) {
+        if (!line) return { state, word: null }; // blank line inside the banner — keep waiting
+        return { state: { bannerSeen: false, awaitingWord: false }, word: line };
+    }
+    // Banner header (e.g. "🐔 CHAT CHICKEN 🐔"). Countdown lines start with
+    // "[CHAT CHICKEN] ..." so they never re-arm the capture.
+    if (line.includes('CHAT CHICKEN') && !line.startsWith('[CHAT CHICKEN]')) {
+        return { state: { ...state, bannerSeen: true }, word: null };
+    }
+    if (state.bannerSeen && line === 'Type:') {
+        return { state: { ...state, awaitingWord: true }, word: null };
+    }
+    return { state, word: null };
+}
+
 /**
  * Tpa-related commands the bot must NEVER send — neither accepts (`/tpa
  * accept`, `/tpaccept`, `/tpa yes`) nor requests (`/tpa <player>`,

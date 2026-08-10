@@ -7,7 +7,7 @@ import Mineflayer from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import Groq from 'groq-sdk';
 
-import { getRandom, parseChatMessage, isTpaCommand, containsProfanity, extractTpaSender, sleep, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection } from './utils.ts';
+import { getRandom, parseChatMessage, isTpaCommand, containsProfanity, extractTpaSender, sleep, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, handleChatChicken, INITIAL_CHICKEN_STATE } from './utils.ts';
 
 import { BotState, attachBot, getState, setState } from './modules/state.ts';
 import { addLog, pushTelemetry } from './core/store.ts';
@@ -60,6 +60,12 @@ const conversationBudget: Record<string, number> = {};
 // two quiz replies from racing (announce + same-line question).
 let pendingQuizLine = false;
 let quizAnswerLock = false;
+
+// ── Chat chicken ─────────────────────────────────────────────────────────────
+// The server's "CHAT CHICKEN" bomb game announces a word (a line after "Type:")
+// that the LAST player to say before the explosion wins. Track the banner state
+// so the announced word is captured and typed out in chat.
+let chickenState = INITIAL_CHICKEN_STATE;
 
 // Outcome banners the quiz posts after the round is decided. They sometimes
 // carry a [QUIZ] tag, so they must never be consumed as the pending question.
@@ -239,11 +245,37 @@ async function answerQuiz(question: string): Promise<void> {
     }
 }
 
+// ── Chat chicken ──────────────────────────────────────────────────────────────
+// The server's "CHAT CHICKEN" bomb game announces a word (a line after "Type:")
+// that the LAST player to say before the explosion wins. Feed each unparsed chat
+// line through the pure state machine in utils.ts; when it yields a word, type
+// it out in chat.
+
+function handleChatChickenLine(flat: string): boolean {
+    const prev = chickenState;
+    const { state, word } = handleChatChicken(chickenState, flat);
+    chickenState = state;
+    if (state.bannerSeen && !prev.bannerSeen) {
+        addLog('system', '[CHICKEN] Game started — waiting for the word...');
+    }
+    if (word !== null) {
+        addLog('system', `[CHICKEN] Word: "${word}" — saying it in chat`);
+        if (bot?.entity && (bot.health ?? 0) > 0) {
+            try { bot.chat(word); } catch {}
+        }
+        return true;
+    }
+    return false;
+}
+
 // ── Disconnect ────────────────────────────────────────────────────────────────
 
 const disconnect = (): void => {
     addLog('system', '[BOT] Disconnecting — cleaning up intervals and listeners');
     setDisconnecting(true);
+    // A mid-round disconnect must not leave the chicken word-capture armed:
+    // the next connection could then type an unrelated unparsed line.
+    chickenState = INITIAL_CHICKEN_STATE;
     // Kill the session first: this clears every session-tracked timer
     // (movementAI schedule, survival restart) and flips session.alive so any
     // in-flight async loop sees the connection is gone and stops itself.
@@ -578,6 +610,8 @@ export function createBot(
                 }
                 return;
             }
+            // Chat chicken bomb game: capture the announced word and type it.
+            if (handleChatChickenLine(flat)) return;
             if (pendingQuizLine && flat.trim() && !QUIZ_OUTCOME.test(flat)) {
                 pendingQuizLine = false;
                 const q = stripChatTimestamps(flat);
