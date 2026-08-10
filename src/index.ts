@@ -51,7 +51,11 @@ async function main() {
     // instead of statically at the top of this file means a first-time run
     // on a fresh clone (no config.json yet) reaches the interactive setup
     // instead of crashing with ERR_MODULE_NOT_FOUND before it ever starts.
-    const { AI_ENABLED, createBot, getBotCommandCtx } = await import('./bot.ts');
+    // Keep the module namespace (not a destructured copy): AI_ENABLED is a
+    // `let` assigned inside createBot(), so a destructure would snapshot the
+    // pre-connect `undefined` and status/startup would wrongly read "OFF".
+    const botModule = await import('./bot.ts');
+    const { createBot, getBotCommandCtx } = botModule;
 
     const serverInfo = `${config.client.host}:${config.client.port}  ·  ${config.client.username}`;
 
@@ -62,7 +66,7 @@ async function main() {
                 return;
             }
             if (cmd === 'status') {
-                addLog('system', `AI: ${AI_ENABLED ? 'ON' : 'OFF'} | Server: ${config.client.host}:${config.client.port}`);
+                addLog('system', `AI: ${botModule.AI_ENABLED ? 'ON' : 'OFF'} | Server: ${config.client.host}:${config.client.port}`);
                 return;
             }
 
@@ -72,7 +76,7 @@ async function main() {
             await handleCommand(ctx, 'Shell', fullCmd);
         },
         onExit: shutdown,
-        aiEnabled: AI_ENABLED,
+        aiEnabled: botModule.AI_ENABLED,
         serverInfo,
     });
 
@@ -82,7 +86,7 @@ async function main() {
 
     addLog('system', '🤖 Gurabott starting...');
     addLog('system', `Connecting to ${config.client.host}:${config.client.port} as ${config.client.username}`);
-    if (!AI_ENABLED) {
+    if (!botModule.AI_ENABLED) {
         addLog('warn', 'AI disabled — set ai.enabled=true and provide a Groq API key in config.json');
     }
 

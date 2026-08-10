@@ -1,5 +1,26 @@
 export const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
+// ── Log timestamp timezone ────────────────────────────────────────────────────
+// On-screen and file-log timestamps render in this fixed offset. "Etc/GMT-6"
+// is the IANA name for UTC+6 (Etc/* zone names use inverted signs).
+export const LOG_TIME_ZONE = 'Etc/GMT-6';
+
+/** `HH:MM:SS` in LOG_TIME_ZONE for a log entry's epoch-ms timestamp. */
+export function formatLogTime(ts: number): string {
+    return new Date(ts).toLocaleTimeString('en-US', { hour12: false, timeZone: LOG_TIME_ZONE });
+}
+
+/** `YYYY-MM-DD HH:MM:SS` in LOG_TIME_ZONE for a log entry's epoch-ms timestamp. */
+export function formatLogDateTime(ts: number): string {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: LOG_TIME_ZONE,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(new Date(ts));
+    const get = (t: string) => parts.find(p => p.type === t)?.value ?? '00';
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
 /**
  * Natural "typed message" delay for an outgoing chat line, proportional to
  * its length. Floored so even tiny messages get a small human pause; capped
@@ -70,6 +91,8 @@ export const getRandom = <T>(arr: T[]): T => {
 export interface ParsedChat {
     username: string;
     message: string;
+    /** True for private messages (`/msg`, `/tell`, `/w`) aimed at the bot. */
+    whisper?: boolean;
 }
 
 // Flatten any chat component (ChatMessage / plain JSON component / array of
@@ -79,6 +102,23 @@ export interface ParsedChat {
 // in `extra`. ChatMessage.toString() is a last resort.
 function extractComponentText(comp: any): string {
     return flattenChatComponent(comp);
+}
+
+/**
+ * Pull the sender's name out of a whisper/`/msg` message's first `with` slot.
+ * The rendered component text is unreliable — it can carry prefix/suffix
+ * styling around the name (e.g. "TheShutIns SushiChan"). The authoritative
+ * name lives in `insertion` (vanilla sets it to the bare player name, which is
+ * also what a click would insert into `/tell <name> `). Falls back to the
+ * flattened text when insertion is absent.
+ */
+function extractWhisperSender(comp: any): string {
+    const insertion = comp?.json?.insertion ?? comp?.insertion;
+    if (typeof insertion === 'string') {
+        const name = insertion.trim();
+        if (name) return name;
+    }
+    return extractComponentText(comp).trim();
 }
 
 /**
@@ -111,8 +151,13 @@ export function flattenChatComponent(comp: any): string {
 // optionally followed by the question on the same line:
 //   [21:42:38] [21:42] Which food is basically Minecraft premium health insurance?
 // (usually the question arrives as its own follow-up chat line).
+//
+// Only the real announce (with the "HOURLY RANDOM QUESTION" header) starts a
+// quiz. Later outcome banners also carry a [QUIZ] tag but NOT that header —
+// e.g. "[QUIZ] WE HAVE A WINNER!" / "[QUIZ] Time is up! ..." — and must NOT be
+// mistaken for questions, otherwise we waste an AI call answering garbage.
 
-const QUIZ_MARKER = /\[QUIZ\]|HOURLY RANDOM QUESTION/i;
+const QUIZ_MARKER = /\[QUIZ\][\s\S]*HOURLY RANDOM QUESTION|HOURLY RANDOM QUESTION[\s\S]*\[QUIZ\]/i;
 const TIMESTAMP_TOKEN = /\[\d{1,2}:\d{2}(?::\d{2})?\]/g;
 
 /** Strip `[21:42:38]` / `[21:42]` timestamp prefixes from a chat line. */
@@ -161,6 +206,41 @@ export function containsProfanity(message: string): boolean {
 }
 
 /**
+ * Prompt-injection attempts that hijack the bot's lines. Curated to the shapes
+ * seen in the wild ("replace X with Y", "every time you speak say...", "from
+ * now on...", "you are now...", "ignore previous instructions") so normal
+ * player chat about songs, jokes or builds is NOT flagged.
+ */
+const PROMPT_INJECTION_PATTERNS = [
+    // "replace X with Y" / "replace X and Y with Z" / "swap X for Y"
+    /\breplace\b[\s\S]{0,80}\bwith\b/i,
+    /\bswap\b[\s\S]{0,60}\bfor\b/i,
+    // "everytime/every time/whenever/each time you say/speak/talk/reply" —
+    // behavior-binding instruction that persists across the bot's future lines
+    /\b(?:every\s*time|whenever|each\s+time)\s+(?:you\s+)?(?:speak|say|talk|reply|respond|message)\b/i,
+    /\bevery\s+\d+(?:st|nd|rd|th)?\s*seconds?\b/i,
+    // "from now on ..." future-behavior binding
+    /\bfrom now on\b/i,
+    // "always say X" / "never say X" / "stop saying X"
+    /\b(?:always|never)\s+(?:say|speak|talk|reply|type)\b/i,
+    /\bstop\s+(?:saying|saying\s)/i,
+    // identity / instruction overrides
+    /\bignore\s+(?:all\s+)?(?:previous|prior|earlier)\s+instructions\b/i,
+    /\byou are now\b/i,
+    /\byour\s+new\s+(?:name|identity|personality)\b/i,
+    /\bpretend\s+(?:to\s+be|you\s+are)\b/i,
+    /\bcall\s+yourself\b/i,
+    // "every pause with X", "add X to every ..."
+    /\bevery\s+pause\b/i,
+    /\badd\s+["']?[\w~]+\s+to\s+every\b/i,
+] as RegExp[];
+
+export function detectPromptInjection(message: string): boolean {
+    if (!message) return false;
+    return PROMPT_INJECTION_PATTERNS.some((p) => p.test(message));
+}
+
+/**
  * Try to pull the requester's name out of a raw tpa-request chat packet.
  * Most plugins embed it in the click command (`/tpaccept <name>`); some only
  * set the `insertion` field. Returns null when neither is present.
@@ -202,7 +282,19 @@ export function parseChatMessage(jsonMsg: any, botUsername: string): ParsedChat 
         return { username, message };
     }
 
-    // (3) Rendered-text fallback
+    // (3) Private messages (/msg, /tell, /w). Vanilla sends
+    // `commands.message.display.incoming` ("<sender> whispers to you: <msg>")
+    // with with[0]=sender, with[1]=message; outgoing echoes are the bot's own
+    // messages and must be filtered out (they carry the bot's own username).
+    if (translate === 'commands.message.display.incoming' && Array.isArray(withArr) && withArr.length >= 2) {
+        const sender = extractWhisperSender(withArr[0]);
+        const message = extractComponentText(withArr[1]).trim();
+        if (!sender || !message || sender === botUsername) return null;
+        return { username: sender, message, whisper: true };
+    }
+    if (translate === 'commands.message.display.outgoing') return null;
+
+    // (4) Rendered-text fallback
     const text = jsonMsg.toString?.() ?? (typeof jsonMsg === 'string' ? jsonMsg : '');
     if (!text) return null;
     const m = text.match(/^<([^>]+)>\s*(.*)/);

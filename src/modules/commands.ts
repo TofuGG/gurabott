@@ -16,6 +16,9 @@ import { suppressMovement, resumeMovement } from '../movementAI.ts';
 import { BotSession } from '../session.ts';
 import { RESOURCE_GROUPS, DOOR_NAMES, BLOCK_DROPS } from '../constants.ts';
 import { getBestToolForBlock, waitForPickup, getBestWeapon } from './mining.ts';
+import { isGuardrailsEnabled, setGuardrailsEnabled } from './guardrails.ts';
+import { clearAllHistory } from './ai.ts';
+import { loadJson, saveJson, loadAllowedUsers } from '../config.ts';
 
 const baritoneGoals = baritonePlugin.goals;
 
@@ -72,7 +75,7 @@ const commands: Record<string, CommandFn> = {
             'Commands:',
             'gping, ghelp, gsay, ginv, ginvsee, geat, gjump, gdrop, gwalk, gcr, gcords, gtp',
             'gfollow <player>, gcraft <item>, gdump, gkill <mob|player>, glast, gsfollow',
-            'gcollect <wood|stone|dirt> <amount>, gsleep, gopendoor, gscollect',
+            'gcollect <wood|stone|dirt> <amount>, gsleep, gopendoor, gscollect, gtab, gfilter, greset',
         ];
         for (const line of helpMessages) {
             await sleep(getRandomDelay(500, 900));
@@ -715,9 +718,84 @@ const commands: Record<string, CommandFn> = {
         };
         bot.chat(`Mode: ${labels[m]}`);
     },
+
+    async greset({ bot }, username) {
+        // Clearing every player's AI context is a TUI-shell action — a player
+        // must never be able to wipe other people's conversation history.
+        if (username !== 'Shell') {
+            addLog('warn', '[RESET] TUI-only — use the TUI shell to reset AI context');
+            return;
+        }
+        clearAllHistory();
+        addLog('system', '[RESET] Cleared all AI conversation context');
+        try { bot.chat('Context wiped! What were we talking about? Popipo~'); } catch {}
+    },
+
+    async gfilter(_ctx, username, args) {
+        // Guardrails are controlled ONLY from the TUI shell — never from MCP
+        // (and never from chat, which the dispatcher already blocks).
+        if (username !== 'Shell') {
+            addLog('warn', '[GUARDRAILS] TUI-only — use the TUI shell to toggle guardrails');
+            return;
+        }
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'on' || sub === 'off') {
+            const enabled = sub === 'on';
+            setGuardrailsEnabled(enabled);
+            try {
+                const cfg = loadJson<Record<string, unknown>>('config.json');
+                cfg.guardrails = enabled;
+                saveJson('config.json', cfg);
+            } catch (err: any) {
+                addLog('error', `[GUARDRAILS] Failed to persist toggle: ${err?.message ?? err}`);
+            }
+            addLog('system', `[GUARDRAILS] ${enabled ? 'ON' : 'OFF'} — blocks prompt-injection line rewrites`);
+        } else {
+            addLog('system', `[GUARDRAILS] Currently ${isGuardrailsEnabled() ? 'ON' : 'OFF'} — usage: gfilter on|off`);
+        }
+    },
+
+    async gtab({ bot }) {
+        const players = Object.values(bot.players) as any[];
+        if (players.length === 0) { addLog('system', '[TAB] No players online'); return; }
+
+        const rows = players.map((p) => {
+            const team = bot.teamMap?.[p.username];
+            const teamName = team
+                ? (team.name?.toString?.().trim() || team.team || '').trim()
+                : '';
+            const ping = (p.ping !== undefined && p.ping !== null) ? `${p.ping}ms` : '?';
+            const name = p.username || 'unknown';
+            return teamName ? `${name} [${teamName}] ${ping}` : `${name} ${ping}`;
+        }).sort((a, b) => a.localeCompare(b));
+
+        const lines: string[] = [];
+        let line = '';
+        for (const row of rows) {
+            const next = line ? `${line}, ${row}` : row;
+            if (next.length > 240) {
+                if (line) lines.push(line);
+                line = row;
+            } else {
+                line = next;
+            }
+        }
+        if (line) lines.push(line);
+
+        addLog('system', `[TAB] ${players.length} player${players.length === 1 ? '' : 's'} online`);
+        for (const l of lines) addLog('system', `[TAB] ${l}`);
+    },
 };
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
+
+// The TUI shell and MCP (external control surface) may always dispatch
+// commands. In-game players may only dispatch if their name is listed in
+// allowedUser.json (hot-reloaded on every command, case-insensitive). This
+// blocks random players — both by typing a g-command in chat and by steering
+// the AI into emitting an action (the AI dispatch passes the requester's real
+// username, so gating by caller identity covers both).
+const ALLOWED_COMMAND_CALLERS = new Set(['Shell', 'MCP']);
 
 export async function handleCommand(
     ctx: CommandContext,
@@ -725,6 +803,12 @@ export async function handleCommand(
     rawMessage: string,
 ): Promise<boolean> {
     if (!ctx.bot || !ctx.bot.inventory || !ctx.bot.entity) return false;
+
+    const key = username.toLowerCase();
+    if (!ALLOWED_COMMAND_CALLERS.has(username) && !loadAllowedUsers().includes(key)) {
+        addLog('warn', `[CMD] Blocked command from ${username}: ${rawMessage.slice(0, 60)}`);
+        return false;
+    }
 
     const args = rawMessage.trim().split(/\s+/);
     const command = args.shift()?.toLowerCase() ?? '';

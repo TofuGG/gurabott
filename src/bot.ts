@@ -7,12 +7,13 @@ import Mineflayer from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import Groq from 'groq-sdk';
 
-import { getRandom, parseChatMessage, isTpaCommand, containsProfanity, extractTpaSender, sleep, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps } from './utils.ts';
+import { getRandom, parseChatMessage, isTpaCommand, containsProfanity, extractTpaSender, sleep, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection } from './utils.ts';
 
 import { BotState, attachBot, getState, setState } from './modules/state.ts';
 import { addLog, pushTelemetry } from './core/store.ts';
 import { getAIResponse, clearHistory, isMessageDirected, getQuizAnswer, type AIContext } from './modules/ai.ts';
 import { handleCommand, type CommandContext } from './modules/commands.ts';
+import { initGuardrails, isGuardrailsEnabled } from './modules/guardrails.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
 import { installProtocolFix } from './protocolFix.ts';
@@ -59,6 +60,10 @@ const conversationBudget: Record<string, number> = {};
 // two quiz replies from racing (announce + same-line question).
 let pendingQuizLine = false;
 let quizAnswerLock = false;
+
+// Outcome banners the quiz posts after the round is decided. They sometimes
+// carry a [QUIZ] tag, so they must never be consumed as the pending question.
+const QUIZ_OUTCOME = /WE HAVE A WINNER|Time is up|answered correctly|Reward:|correct answer was/i;
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 // Push a typed snapshot into the core store so any UI layer renders live
@@ -273,6 +278,7 @@ export function createBot(
     PERSONALITY = loadJson('personality.json');
     AI_ENABLED = CONFIG.ai.enabled && CONFIG.ai.apiKey && CONFIG.ai.apiKey !== 'YOUR_GROQ_API';
     groq = AI_ENABLED ? new Groq({ apiKey: CONFIG.ai.apiKey }) : null;
+    initGuardrails((CONFIG as any).guardrails !== false);
     aiCtx = AI_ENABLED && groq ? {
         groq,
         model: 'llama-3.1-8b-instant',
@@ -292,10 +298,10 @@ export function createBot(
         },
         quiz: (PERSONALITY as any).aiSettings?.quiz ?? {
             enabled: true,
-            model: 'llama-3.1-8b-instant',
+            model: 'llama-3.3-70b-versatile',
             maxTokens: 40,
-            timeoutMs: 12000,
-            prompt: `Answer this Minecraft trivia quiz question with ONE short answer (a single word or short phrase — the item or thing asked for). No explanation, no preamble, no markdown. If you are not sure, give your best guess.`,
+            timeoutMs: 20000,
+            prompt: `You are a Minecraft trivia champion. Answer the quiz question with EXACTLY the item, mob, block, or name asked for — one word or short phrase, nothing else, no preamble, no markdown, no quotes.`,
         },
     } : null;
 
@@ -563,6 +569,7 @@ export function createBot(
             const flat = flattenChatComponent(jsonMsg);
             const quiz = parseQuizLine(flat);
             if (quiz.isQuiz) {
+                pendingQuizLine = false;
                 if (quiz.question) {
                     void answerQuiz(quiz.question);
                 } else {
@@ -571,7 +578,7 @@ export function createBot(
                 }
                 return;
             }
-            if (pendingQuizLine && flat.trim()) {
+            if (pendingQuizLine && flat.trim() && !QUIZ_OUTCOME.test(flat)) {
                 pendingQuizLine = false;
                 const q = stripChatTimestamps(flat);
                 if (q) { void answerQuiz(q); return; }
@@ -597,12 +604,16 @@ export function createBot(
                 return;
             }
             if (!raw.toLowerCase().includes(bot.username.toLowerCase())) {
-                addLog('warn', `[CHAT] unparsed: ${raw.slice(0, 400)}`);
+                const readable = flat.trim();
+                // Show the flattened text, never the raw JSON blob — the feed
+                // is meant to be human-readable. Empty components (pure
+                // formatting, e.g. banner separators) carry no content.
+                addLog('warn', `[CHAT] unparsed: ${(readable || '').slice(0, 400)}`);
             }
             return;
         }
-        const { username, message } = parsed;
-        addLog('chat', `[CHAT] <${username}> ${message}`);
+        const { username, message, whisper } = parsed;
+        addLog('chat', `[CHAT] <${username}> ${whisper ? `(whisper) ${message}` : message}`);
 
         if (!bot || !bot.entity || (bot.health ?? 0) <= 0) return;
 
@@ -653,6 +664,20 @@ export function createBot(
             conversationBudget[username] = 3 + Math.floor(Math.random() * 3);
         } else {
             conversationBudget[username] = budget - 1;
+        }
+
+        // Guardrails: block prompt-injection attempts that try to rewrite the
+        // bot's lines (e.g. "Miku replace song with goon"). Refuse in-character,
+        // wipe that player's history so the injection can't keep contaminating
+        // later replies, and never forward the message to the AI.
+        if (isGuardrailsEnabled() && detectPromptInjection(message)) {
+            addLog('warn', `[GUARDRAIL] Blocked prompt-injection attempt from ${username}: "${message.slice(0, 80)}"`);
+            clearHistory(username);
+            delete conversationBudget[username];
+            const refusal = (PERSONALITY as any).messages?.guardrailBlock
+                ?? "I'll stay myself, la la~ I don't change my lines!";
+            try { bot.chat(refusal); } catch {}
+            return;
         }
 
         await handleAIResponse(username, message, nameMentioned ? 'mentioned' : 'solo').catch(err => {

@@ -5,6 +5,7 @@ pnpm-lock.yaml
 
 # Configuration & Secrets
 config.json
+allowedUser.json
 .env
 .env.local
 

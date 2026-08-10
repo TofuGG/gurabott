@@ -1,0 +1,10 @@
+{
+    "//": "Only these Minecraft usernames can use g-commands (case-insensitive). Add yours to allowedUsers. Shell and MCP are always allowed. Entries under _example are inactive.",
+    "allowedUsers": [
+        "PlayerName"
+    ],
+    "_example": [
+        "Notch",
+        "Steve"
+    ]
+}

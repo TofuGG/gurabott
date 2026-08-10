@@ -513,12 +513,15 @@ export function startMovementAI(
             // gidle: never walk. Just stand and, when a player is in range,
             // look at them and crouch/uncrouch a few times.
             if (mode === 'idle') {
+                const label = ctx.nearbyPlayers > 0 ? 'idle greet (look + crouch)' : 'idle stand';
                 if (ctx.nearbyPlayers > 0) {
                     await doIdleGreet(bot);
-                    addLog('movement', '[MOV] idle greet (look + crouch)');
                 } else {
                     await doStandLook(bot);
-                    addLog('movement', '[MOV] idle stand');
+                }
+                if (lastLoggedBehavior !== label) {
+                    lastLoggedBehavior = label;
+                    addLog('movement', `[MOV] ${label}`);
                 }
                 return 'stand_look';
             }
@@ -553,7 +556,10 @@ export function startMovementAI(
             };
 
             const behavior = pickWeighted(merged);
-            addLog('movement', `[MOV] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
+            if (lastLoggedBehavior !== behavior) {
+                lastLoggedBehavior = behavior;
+                addLog('movement', `[MOV] ${behavior} (${ctx.timeOfDay}, players=${ctx.nearbyPlayers}, hostiles=${ctx.nearbyHostiles}, safeRadius=${safeRadius})`);
+            }
 
             switch (behavior) {
                 case 'stand_look':      await doStandLook(bot); break;
@@ -588,6 +594,9 @@ export function startMovementAI(
 
     // Schedule ticks with variable delay (5–12s between each behavior)
     let lastBehavior: WanderBehavior | null = null;
+    // Consecutive identical behaviors are logged only once — otherwise gidle
+    // mode floods the log with the same "[MOV] idle stand" line every few sec.
+    let lastLoggedBehavior: string | null = null;
 
     // Returns a natural next-tick delay based on what just happened.
     // Chains similar behaviors quickly; switches context more slowly.

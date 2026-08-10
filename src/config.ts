@@ -30,6 +30,7 @@ export interface BotConfig {
     greeting: boolean;
     autoReconnect: boolean;
     behaviorMode: BotMode;
+    guardrails: boolean;
     mcp: {
         enabled: boolean;
         host: string;
@@ -45,6 +46,15 @@ export interface BotConfig {
 // process is launched from.
 const CONFIG_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config.json');
 
+// Template for the auto-created allowlist. The "//" note and "_example"
+// entries are documentation only — the loader only reads the "allowedUsers"
+// array, so examples are effectively commented out.
+const ALLOWED_USERS_TEMPLATE: Record<string, unknown> = {
+    '//': 'Only these Minecraft usernames can use g-commands (case-insensitive). Add yours to allowedUsers, e.g. "Notch". Shell and MCP are always allowed. Entries under _example are inactive.',
+    allowedUsers: [],
+    _example: ['Notch', 'Steve'],
+};
+
 /**
  * Lazily load a JSON file from the repo root. Used by createBot() after the
  * interactive setup has guaranteed the files exist on disk.
@@ -53,6 +63,52 @@ export function loadJson<T>(relativePath: string): T {
     const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', relativePath);
     const raw = fs.readFileSync(p, 'utf-8');
     return JSON.parse(raw) as T;
+}
+
+/** Persist an arbitrary JSON value to a repo-root file (e.g. toggling guardrails). */
+export function saveJson(relativePath: string, data: unknown): void {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', relativePath);
+    fs.writeFileSync(p, JSON.stringify(data, null, 2));
+}
+
+/**
+ * Load the command allowlist from allowedUser.json — either a plain JSON array
+ * of Minecraft usernames or an object with an "allowedUsers" array (any other
+ * keys, e.g. a "//" note or "_example" entries, are treated as comments and
+ * ignored). Hot-read on every command dispatch so edits apply immediately.
+ * Fail-closed: an unreadable or malformed file yields an empty list (only
+ * Shell/MCP can dispatch). On first launch the file is auto-created from the
+ * example template. Entries are trimmed + lowercased for case-insensitive
+ * matching.
+ */
+export function loadAllowedUsers(): string[] {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'allowedUser.json');
+    let raw: string;
+    try {
+        raw = fs.readFileSync(p, 'utf-8');
+    } catch {
+        // First launch — create the file with the commented-out example so the
+        // operator can see the shape, then behave as an empty list.
+        try { fs.writeFileSync(p, JSON.stringify(ALLOWED_USERS_TEMPLATE, null, 4) + '\n'); } catch {}
+        return [];
+    }
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return [];
+    }
+
+    let entries: unknown = parsed;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        entries = (parsed as Record<string, unknown>).allowedUsers;
+    }
+    if (!Array.isArray(entries)) return [];
+    return entries
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean);
 }
 
 export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
@@ -104,6 +160,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         if (config.autoReconnect === undefined) config.autoReconnect = true;
         if (config.behaviorMode === undefined) config.behaviorMode = 'idle';
         config.behaviorMode = parseMode(config.behaviorMode);
+        if (config.guardrails === undefined) config.guardrails = true;
         if (!config.mcp) {
             config.mcp = { enabled: true, host: '127.0.0.1', port: 5400 };
         }
@@ -169,6 +226,7 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
             greeting: enableGreeting,
             autoReconnect: enableReconnect,
             behaviorMode,
+            guardrails: existing?.guardrails ?? true,
             mcp: existing?.mcp ?? {
                 enabled: true,
                 host: '127.0.0.1',

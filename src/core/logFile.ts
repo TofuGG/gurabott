@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { onLog, addLog, type LogEntry } from './store.ts';
+import { formatLogDateTime, LOG_TIME_ZONE } from '../utils.ts';
 
 export const KEEP_LAST_N = 10;
 export const LATEST_FILE = 'Latest_Log.txt';
@@ -25,14 +26,19 @@ export const LATEST_FILE = 'Latest_Log.txt';
 // src/core -> src -> repo root
 export const LOGS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'logs');
 
-const pad = (n: number, width = 2): string => String(n).padStart(width, '0');
-
 /** `<YYYY-MM-DD-HH-mm-ss-SSS>-<username>.log` — Windows-safe (no colons). */
 export function buildRunFileName(now: Date, username: string): string {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: LOG_TIME_ZONE,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        fractionalSecondDigits: 3, hour12: false,
+    }).formatToParts(now);
+    const get = (t: string) => parts.find(p => p.type === t)?.value ?? '00';
     const stamp =
-        `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
-        `-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}` +
-        `-${pad(now.getMilliseconds(), 3)}`;
+        `${get('year')}-${get('month')}-${get('day')}` +
+        `-${get('hour')}-${get('minute')}-${get('second')}` +
+        `-${get('fractionalSecond')}`;
     const safeUser = (username || 'bot').replace(/[^A-Za-z0-9_-]/g, '_');
     return `${stamp}-${safeUser}.log`;
 }
@@ -101,7 +107,7 @@ export function initFileLogging(username: string): () => void {
     writeLine({
         ts: Date.now(),
         type: 'system',
-        text: `--- Gurabott run started ${new Date().toISOString()} (user: ${username}) ---`,
+        text: `--- Gurabott run started ${formatLogDateTime(Date.now())} (+06) (user: ${username}) ---`,
     });
 
     return () => {

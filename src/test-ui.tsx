@@ -2,6 +2,7 @@
 // history, Esc clear/exit, Ctrl+C exit) using OpenTUI's virtual test renderer.
 import { testRender } from '@opentui/solid';
 import { App } from './ui/app.tsx';
+import { addLog } from './core/store.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -35,6 +36,20 @@ const footerLine = () => {
 const PLACEHOLDER = 'Type a command';
 
 await flush();
+
+console.log('\n── TUI Scrollback Wrapping ──');
+// Entries longer than the terminal width wrap onto additional physical rows
+// instead of clipping at the right edge. (Placed before the exit tests: after
+// Esc/Ctrl+C the test renderer stops painting the scrollback region.)
+addLog('chat', 'WRAPTEST ' + 'x'.repeat(200) + ' ENDTAIL');
+await flush();
+await flush(); // let layout + virtualizer reconcile settle
+const wrapRows = captureCharFrame().split('\n');
+const headRow = wrapRows.findIndex(l => l.includes('WRAPTEST'));
+const tailRow = wrapRows.findIndex(l => l.includes('ENDTAIL'));
+assert('Wrapped head visible', headRow >= 0, headRow);
+assert('Wrapped tail visible', tailRow >= 0, tailRow);
+assert('Long entry wraps to multiple rows', tailRow > headRow, { headRow, tailRow });
 
 console.log('\n── TUI Footer Input ──');
 
