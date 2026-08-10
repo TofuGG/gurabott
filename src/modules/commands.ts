@@ -7,7 +7,7 @@ import type { Bot } from 'mineflayer';
 import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
-import { sleep, safeGoto, withTimeout } from '../utils.ts';
+import { sleep, safeGoto, withTimeout, resolvePlayerTeamName, resolveSelfTeamFromSidebar } from '../utils.ts';
 import { addLog } from '../core/store.ts';
 import { BotState, getState, setState, clearAllControls } from './state.ts';
 import { getMode, setMode, type BotMode } from './mode.ts';
@@ -759,11 +759,11 @@ const commands: Record<string, CommandFn> = {
         const players = Object.values(bot.players) as any[];
         if (players.length === 0) { addLog('system', '[TAB] No players online'); return; }
 
+        const teams = (bot as any).teams ?? {};
+        const selfTeamFallback = resolveSelfTeamFromSidebar(teams);
         const rows = players.map((p) => {
-            const team = bot.teamMap?.[p.username];
-            const teamName = team
-                ? (team.name?.toString?.().trim() || team.team || '').trim()
-                : '';
+            const teamName = resolvePlayerTeamName(teams, p.username)
+                ?? (p.username === bot.username ? selfTeamFallback : null);
             const ping = (p.ping !== undefined && p.ping !== null) ? `${p.ping}ms` : '?';
             const name = p.username || 'unknown';
             return teamName ? `${name} [${teamName}] ${ping}` : `${name} ${ping}`;

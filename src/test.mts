@@ -2,7 +2,7 @@
 import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
 import { parseMode } from './modules/mode.ts';
 import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from './modules/ai.ts';
-import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection } from './utils.ts';
+import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
 
@@ -341,6 +341,46 @@ await section('Prompt-Injection Guardrails', async () => {
     assert('Benign music talk', !detectPromptInjection('Miku sing me a song'));
     assert('Benign "replace" chat', !detectPromptInjection('I need to replace my pickaxe'));
     assert('Empty string', !detectPromptInjection(''));
+});
+
+// TAB TEAM RESOLUTION (raw structures captured from seraiahsmp.xyz via gtabdbg)
+await section('TAB Team Resolution', async () => {
+    const prefix = (s: string) => ({ toString: () => s });
+    const teams = {
+        Forsak3n1: { team: 'Forsak3n1', prefix: prefix('Forsak3n '), members: ['Vxr_tex', 'KrxnMane'] },
+        Unbound: { team: 'Unbound', prefix: prefix('Unbound '), members: ['Cloudy_', 'MarkedFan294856'] },
+        Xylems: { team: 'Xylems', prefix: prefix('Xylems '), members: ['Peanuxx'] },
+        tyrants1: { team: 'tyrants1', prefix: prefix('tyrants '), members: ['tenz'] },
+        BATUMBAKAL: { team: 'BATUMBAKAL', prefix: prefix('BATUMBAKAL '), members: ['UtotKoMabango', 'KIR4A4'] },
+        StrongestHorseOf: { team: 'StrongestHorseOf', prefix: prefix('StrongestHorseOfHistory '), members: ['MinTachyon'] },
+        EMPIRE: { team: 'EMPIRE', prefix: prefix('Empire '), members: ['D1RECTORM4CE'] },
+        TheShutIns: { team: 'TheShutIns', prefix: prefix('TheShutIns '), members: [] },
+        'TAB-Sidebar-1': { team: 'TAB-Sidebar-1', prefix: prefix('ᴘʀᴏꜰɪʟᴇ'), members: ['§0§1§r'] },
+        'TAB-Sidebar-4': { team: 'TAB-Sidebar-4', prefix: prefix(' ✧ ᴛᴇᴀᴍ: TheShutIns'), members: ['§0§4§r'] },
+        'TAB-Sidebar-10': { team: 'TAB-Sidebar-10', prefix: prefix(' ✧ ᴏɴʟɪɴᴇ: 12'), members: ['§1§0§r'] },
+        '6Cloudy_A': { team: '6Cloudy_A', prefix: prefix(''), members: ['Cloudy_'] },
+        '6PeanuxxA': { team: '6PeanuxxA', prefix: prefix('⚔ (19s) '), suffix: prefix(' 39.71❤'), color: 'red', members: ['Peanuxx'] },
+        '6MikuA': { team: '6MikuA', prefix: prefix(''), members: ['Miku'] },
+        '6D1RECTORM4CEA': { team: '6D1RECTORM4CEA', prefix: prefix(''), members: ['D1RECTORM4CE'] },
+    } as any;
+
+    assert('Real team via members', resolvePlayerTeamName(teams, 'Vxr_tex') === 'Forsak3n1');
+    assert('Real team for combat-tab player', resolvePlayerTeamName(teams, 'Peanuxx') === 'Xylems');
+    assert('Real team for direct teamMap player', resolvePlayerTeamName(teams, 'tenz') === 'tyrants1');
+    assert('Renamed team (prefix stale)', resolvePlayerTeamName(teams, 'KrxnMane') === 'Forsak3n1');
+    assert('Offline member kept in team', resolvePlayerTeamName(teams, 'MarkedFan294856') === 'Unbound');
+    assert('Bot own team is empty (no match)', resolvePlayerTeamName(teams, 'Miku') === null);
+    assert('Unknown player', resolvePlayerTeamName(teams, 'Nobody') === null);
+    assert('Empty teams', resolvePlayerTeamName({}, 'Miku') === null);
+
+    assert('Sorting team classified internal', isTabInternalTeam(teams['6MikuA']) === true);
+    assert('Combat sorting team classified internal', isTabInternalTeam(teams['6PeanuxxA']) === true);
+    assert('Sidebar team classified internal', isTabInternalTeam(teams['TAB-Sidebar-4']) === true);
+    assert('Real team classified external', isTabInternalTeam(teams.Unbound) === false);
+    assert('Empty real team classified external', isTabInternalTeam(teams.TheShutIns) === false);
+
+    assert('Self team from sidebar', resolveSelfTeamFromSidebar(teams) === 'TheShutIns');
+    assert('Self team not from stats lines', resolveSelfTeamFromSidebar(teams) !== '12');
 });
 
 console.log(`\n${'═'.repeat(52)}`);

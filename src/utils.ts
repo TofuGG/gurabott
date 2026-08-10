@@ -304,3 +304,42 @@ export function parseChatMessage(jsonMsg: any, botUsername: string): ParsedChat 
     if (!message || username === botUsername) return null;
     return { username, message };
 }
+
+// ── TAB team resolution ───────────────────────────────────────────────────────
+// TAB-plugin servers create two kinds of internal teams that must never be shown
+// as a player's team: `TAB-Sidebar-N` (sidebar lines, fake placeholder members
+// like "§0§1§r") and per-player sorting teams named `<color><name><suffix>`
+// (e.g. "6MikuA") whose sole member is the embedded player name. Real teams
+// carry the actual server scoreboard teams (Unbound, TheShutIns, ...).
+
+export function isTabInternalTeam(team: any): boolean {
+    const name = typeof team?.team === 'string' ? team.team : '';
+    if (/^TAB-Sidebar-\d+$/i.test(name)) return true;
+    const members = Array.isArray(team?.members) ? team.members : [];
+    if (members.length === 1) {
+        const m = /^([0-9a-f])(.+)([A-Za-z])$/.exec(name);
+        if (m && m[2] === members[0]) return true;
+    }
+    return false;
+}
+
+export function resolvePlayerTeamName(teams: Record<string, any>, username: string): string | null {
+    for (const team of Object.values(teams)) {
+        if (isTabInternalTeam(team)) continue;
+        const members = Array.isArray(team?.members) ? team.members : [];
+        if (members.includes(username)) return team.team;
+    }
+    return null;
+}
+
+// The bot's own team is never mirrored into its member list by TAB (TheShutIns
+// stays empty client-side), but TAB prints it on the bot's personal sidebar as
+// a "ᴛᴇᴀᴍ: <name>" line. Used as a fallback for the bot itself only.
+export function resolveSelfTeamFromSidebar(teams: Record<string, any>): string | null {
+    for (const team of Object.values(teams)) {
+        const prefix = typeof team?.prefix?.toString === 'function' ? team.prefix.toString() : '';
+        const m = /ᴛᴇᴀᴍ\s*[:：]\s*(\S+)/.exec(prefix);
+        if (m) return m[1];
+    }
+    return null;
+}
