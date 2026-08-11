@@ -30,5 +30,35 @@
   },
   "action": {
     "retryDelay": 5000
+  },
+  "gui": {
+    "debugWindows": false,
+    "profiles": {
+      "shop": {
+        "titleMatch": ["sell", "shop"],
+        "open": { "via": "chat", "command": "/sell" },
+        "clickDelayMs": 400,
+        "actions": {
+          "sell": {
+            "steps": [
+              { "clickItem": { "name": "dirt" }, "shift": true },
+              { "clickItem": { "customName": "sell" } }
+            ]
+          }
+        }
+      },
+      "spawner": {
+        "titleMatch": ["spawner"],
+        "open": { "via": "rightClickBlock", "block": "spawner" },
+        "clickDelayMs": 400,
+        "actions": {
+          "pickup": {
+            "steps": [
+              { "clickItem": { "customName": "drop all" } }
+            ]
+          }
+        }
+      }
+    }
   }
 }

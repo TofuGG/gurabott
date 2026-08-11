@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import readline from 'readline';
 import type { BotMode } from './modules/mode.ts';
 import { parseMode } from './modules/mode.ts';
+import type { GuiConfig } from './modules/gui.ts';
 
 export interface BotConfig {
     client: {
@@ -39,6 +40,7 @@ export interface BotConfig {
     action: {
         retryDelay: number;
     };
+    gui: GuiConfig;
 }
 
 // Resolved relative to this file's own location (repo root, one level up
@@ -167,6 +169,9 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         if (!config.action) {
             config.action = { retryDelay: 5000 };
         }
+        if (!config.gui) {
+            config.gui = { debugWindows: false, profiles: {} };
+        }
         // Persist the backfilled config so bot.ts's loadJson() (which re-reads
         // the file from disk) sees the same fixes instead of a stale legacy
         // file that still crashes createBot (e.g. missing action.retryDelay).
@@ -234,7 +239,11 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
             },
             action: existing?.action ?? {
                 retryDelay: 5000
-            }
+            },
+            gui: existing?.gui ?? {
+                debugWindows: false,
+                profiles: {},
+            },
         };
 
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));

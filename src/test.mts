@@ -2,9 +2,10 @@
 import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
 import { parseMode } from './modules/mode.ts';
 import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from './modules/ai.ts';
-import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE } from './utils.ts';
+import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE, parseChatMessage, parseDiscordMessage } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
+import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates } from './modules/gui.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -435,6 +436,92 @@ await section('TAB Team Resolution', async () => {
 
     assert('Self team from sidebar', resolveSelfTeamFromSidebar(teams) === 'TheShutIns');
     assert('Self team not from stats lines', resolveSelfTeamFromSidebar(teams) !== '12');
+});
+
+// CHEST-GUI AUTOMATION (pure helpers from gui.ts)
+await section('Chest-GUI Automation', async () => {
+    // Window title handling
+    assert('Plain title passes through', titleToPlainText('Shop') === 'Shop');
+    assert('JSON component title parsed', titleToPlainText('{"text":"Shop"}') === 'Shop');
+    assert('JSON title with empty text flattens extra', titleToPlainText('{"extra":["Sell"],"text":""}') === 'Sell');
+    assert('Non-string title stringified', titleToPlainText(42) === '42');
+    assert('NBT title decoded', flattenChatComponent({ type: 'compound', value: { text: { type: 'string', value: 'Spawner' } } }) === 'Spawner');
+
+    // Raw prismarine-nbt node shapes (1.20.5+ item names/lores, some titles)
+    assert('NBT string node', flattenChatComponent({ type: 'string', value: 'Drop All' }) === 'Drop All');
+    assert('NBT number node', flattenChatComponent({ type: 'int', value: 7 }) === '7');
+    assert('NBT compound skips color', flattenChatComponent({ type: 'compound', value: { text: { type: 'string', value: 'Drop All' }, color: { type: 'string', value: 'gold' } } }) === 'Drop All');
+    assert('NBT compound with extra list', flattenChatComponent({
+        type: 'compound',
+        value: {
+            text: { type: 'string', value: '' },
+            extra: { type: 'list', value: { type: 'compound', value: [{ type: 'compound', value: { text: { type: 'string', value: 'Left-click: ' } } }, { type: 'compound', value: { text: { type: 'string', value: 'Drop all' } } }] } },
+        },
+    }) === 'Left-click: Drop all');
+    assert('NBT list of compounds', flattenChatComponent({ type: 'list', value: { type: 'compound', value: [{ type: 'compound', value: { text: { type: 'string', value: 'a' } } }, { type: 'compound', value: { text: { type: 'string', value: 'b' } } }] } }) === 'ab');
+    assert('NBT null value empty', flattenChatComponent({ type: 'compound', value: {} }) === '');
+    assert('Plain component still flattens', flattenChatComponent({ text: 'X', extra: [{ text: 'Y' }] }) === 'XY');
+
+    assert('Title match case-insensitive', windowMatchesTitle('SHOP', ['shop']));
+    assert('Title match substring', windowMatchesTitle('Shop & Sell', ['sell']));
+    assert('Title match JSON title', windowMatchesTitle('{"text":"Spawner"}', ['spawner']));
+    assert('Unrelated title ignored', !windowMatchesTitle('Chest', ['sell', 'shop']));
+    assert('Empty matcher never matches', !windowMatchesTitle('Shop', []));
+
+    // Item matching
+    const emerald = { name: 'emerald', displayName: 'Emerald', customName: null, customLore: null };
+    const sellButton = { name: 'paper', displayName: 'Paper', customName: '§aSell', customLore: ['Click to sell all'] };
+    const dirt = { name: 'dirt', displayName: 'Dirt', customName: null, customLore: null };
+    // 1.20.5+ custom names/lores arrive as chat-component OBJECTS, not strings.
+    const componentButton = {
+        name: 'dropper',
+        displayName: 'Dropper',
+        customName: { text: '', extra: [{ text: 'Drop ' }, { text: 'All', color: 'gold' }] },
+        customLore: [{ text: 'Shift-click to ', extra: ['drop everything'] }],
+    };
+
+    assert('Match by name', itemMatches(emerald, { name: 'emerald' }));
+    assert('Match by displayName case-insensitive', itemMatches(emerald, { name: 'EMERALD' }));
+    assert('Match by customName', itemMatches(sellButton, { customName: 'sell' }));
+    assert('Match by lore substring', itemMatches(sellButton, { lore: 'sell all' }));
+    assert('Match component customName flattened', itemMatches(componentButton, { customName: 'drop all' }));
+    assert('Match component lore flattened', itemMatches(componentButton, { lore: 'shift-click' }));
+    assert('Name mismatch rejected', !itemMatches(emerald, { name: 'dirt' }));
+    assert('CustomName mismatch rejected', !itemMatches(dirt, { customName: 'sell' }));
+    assert('Null item rejected', !itemMatches(null, { name: 'dirt' }));
+    assert('Empty criteria matches anything non-null', itemMatches(dirt, {}));
+
+    // Slot lookup across a window
+    const window = { slots: [null, emerald, sellButton, null, dirt] };
+    assert('Find slot by name', findSlotByItem(window, { name: 'emerald' }) === 1);
+    assert('Find slot by customName', findSlotByItem(window, { customName: 'sell' }) === 2);
+    assert('Find slot by lore', findSlotByItem(window, { lore: 'click' }) === 2);
+    assert('No match returns null', findSlotByItem(window, { name: 'netherite' }) === null);
+    assert('Missing slots array returns null', findSlotByItem({}, { name: 'dirt' }) === null);
+    assert('Skips empty slots', findSlotByItem(window, { name: 'dirt' }) === 4);
+
+    // Spawner block name across versions (renamed mob_spawner → spawner in 1.21)
+    assert('Modern spawner matches both names', JSON.stringify(blockNameCandidates('spawner')) === '["spawner","mob_spawner"]');
+    assert('Legacy spawner matches both names', JSON.stringify(blockNameCandidates('mob_spawner')) === '["spawner","mob_spawner"]');
+    assert('Non-spawner block single candidate', JSON.stringify(blockNameCandidates('chest')) === '["chest"]');
+});
+
+// DISCORD BRIDGE PARSING
+await section('Discord Bridge Parsing', async () => {
+    assert('Rank + name parsed', JSON.stringify(parseDiscordMessage('[Discord | Staffs] 𑣲Helper | ❥ℬ𝓁𝒶𝓃𝒸 » Miku do you like me')) === '{"username":"❥ℬ𝓁𝒶𝓃𝒸","message":"Miku do you like me"}');
+    assert('Name only, no rank', JSON.stringify(parseDiscordMessage('[Discord] Alice » hello everyone')) === '{"username":"Alice","message":"hello everyone"}');
+    assert('Channel in prefix', JSON.stringify(parseDiscordMessage('[Discord | General] Bob » hey')) === '{"username":"Bob","message":"hey"}');
+    assert('Name with spaces kept', JSON.stringify(parseDiscordMessage('[Discord | Staffs] Owner | Jane Doe » hi')) === '{"username":"Jane Doe","message":"hi"}');
+    assert('Non-discord line ignored', parseDiscordMessage('<Steve> hello') === null);
+    assert('Empty message rejected', parseDiscordMessage('[Discord] Alice » ') === null);
+
+    // Through parseChatMessage (the real entry point)
+    const parsed = parseChatMessage('[Discord | Staffs] 𑣲Helper | ❥ℬ𝓁𝒶𝓃𝒸 » Miku do you like me', 'miku');
+    assert('parseChatMessage handles discord', parsed?.username === '❥ℬ𝓁𝒶𝓃𝒸' && parsed?.message === 'Miku do you like me', parsed);
+    const own = parseChatMessage('[Discord | Staffs] Helper | Miku » hello', 'miku');
+    assert('Bot own echo filtered', own === null, own);
+    const vanilla = parseChatMessage('<Steve> hi there', 'miku');
+    assert('Vanilla chat still parses', vanilla?.username === 'Steve' && vanilla?.message === 'hi there', vanilla);
 });
 
 console.log(`\n${'═'.repeat(52)}`);

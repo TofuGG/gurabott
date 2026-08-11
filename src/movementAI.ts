@@ -37,6 +37,45 @@ export function isMovementSuppressed(): boolean { return suppressed > 0; }
 // flag from the previous session can never freeze the new bot.
 export function resetMovementSuppression(): void { suppressed = 0; }
 
+// ── Stare mode (glook) ────────────────────────────────────────────────────────
+// glook <x> <y> <z> locks the bot's head on a block position and freezes its
+// social/movement behaviors — no looking at players, no crouch-fidgeting, no
+// wandering — until gidle (or a reconnect) clears it. The look loop is gated
+// by a token so a new glook invalidates any running loop, and the session end
+// hook clears the target so a reconnected bot never resumes an old stare.
+let stareTarget: Vec3 | null = null;
+let stareToken = 0;
+
+export function isStaring(): boolean {
+    return stareTarget !== null;
+}
+
+export function startStare(bot: Mineflayer.Bot, pos: Vec3, session: BotSession): void {
+    stopStare(bot);
+    stareTarget = pos;
+    const token = ++stareToken;
+    addLog('movement', `[MOV] staring at ${pos.floored()}`);
+    // Stand still: cancel any path, release all movement keys and sneaking.
+    try { bot.ashfinder?.stop?.(); } catch {}
+    const controls = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
+    for (const c of controls) try { bot.setControlState(c, false); } catch {}
+    const loop = async () => {
+        while (session.alive && token === stareToken && bot.entity) {
+            try { await bot.lookAt(pos.offset(0.5, 0.5, 0.5), false); } catch {}
+            await sleep(600 + Math.random() * 600);
+        }
+    };
+    void loop();
+}
+
+export function stopStare(bot?: Mineflayer.Bot): void {
+    stareTarget = null;
+    stareToken++;
+    if (bot) {
+        try { bot.setControlState('sneak', false); } catch {}
+    }
+}
+
 const baritoneGoals = baritonePlugin.goals;
 
 // How close (blocks) a player must be for the bot to react socially — glance,
@@ -442,10 +481,15 @@ export function startMovementAI(
 ) {
     let active = false;
 
+    // A disconnect/reconnect must clear any active stare so the new connection
+    // starts clean instead of locking onto an old target.
+    session.onEnd(() => { stopStare(); });
+
     // Glance at players who walk close — feels reactive and aware
     let lastGlanceTime = 0;
     bot.on('entityMoved', (entity: any) => {
         if (suppressed) return;
+        if (stareTarget) return; // glook owns the head — don't glance at players
         if (active) return; // don't interrupt a behavior
         if (getState() !== 'idle') return;
         if (isEscaping?.()) return;
@@ -497,6 +541,9 @@ export function startMovementAI(
     async function tick(): Promise<WanderBehavior | null> {
         // Only run when bot is idle — and never while dead
         if (suppressed > 0 || !session.alive || session.moveActive || getState() !== 'idle' || active || !bot.entity?.onGround || (bot.health ?? 0) <= 0 || isEscaping?.()) return null;
+        // glook: the stare loop owns the head — no wander, no look-at-player,
+        // no crouch-fidget, no idle greet until gidle clears it.
+        if (stareTarget) return null;
         active = true;
 
         try {

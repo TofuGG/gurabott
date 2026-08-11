@@ -12,7 +12,8 @@ import { addLog } from '../core/store.ts';
 import { BotState, getState, setState, clearAllControls } from './state.ts';
 import { getMode, setMode, type BotMode } from './mode.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
-import { suppressMovement, resumeMovement } from '../movementAI.ts';
+import { suppressMovement, resumeMovement, startStare, stopStare } from '../movementAI.ts';
+import { openProfile, runProfileAction, setScanMode, isScanMode, dumpCurrentWindow, getProfileNames, openAndScanBlock, dropFromSpawner } from './gui.ts';
 import { BotSession } from '../session.ts';
 import { RESOURCE_GROUPS, DOOR_NAMES, BLOCK_DROPS } from '../constants.ts';
 import { getBestToolForBlock, waitForPickup, getBestWeapon } from './mining.ts';
@@ -90,6 +91,8 @@ const commands: Record<string, CommandFn> = {
             'gping, ghelp, gsay, ginv, ginvsee, geat, gjump, gdrop, gwalk, gcr, gcords, gtp',
             'gfollow <player>, gcraft <item>, gdump, gkill <mob|player>, glast, gsfollow',
             'gcollect <wood|stone|dirt> <amount>, gsleep, gopendoor, gscollect, gtab, gfilter, greset',
+            'gscan, gopen <profile>, grun <profile> <action>, gsell, gspawner (open+scan spawner GUI), gsdrop (spawner → chest → drop all)',
+            'gotocord <x> <y> <z>, glook <x> <y> <z> (stare until gidle)',
         ];
         for (const line of helpMessages) {
             await sleep(getRandomDelay(500, 900));
@@ -99,7 +102,14 @@ const commands: Record<string, CommandFn> = {
 
     async gsay({ bot }, _username, args) {
         if (args.length === 0) { reply('Usage: gsay <message>'); return; }
-        say(bot, args.join(' '));
+        const message = args.join(' ');
+        addLog('chat', message);
+        // gsay is the operator's channel: it may send /tpa commands (the chat
+        // guard blocks them everywhere else). Fall back to bot.chat if the
+        // bypass isn't installed yet.
+        const chatTui = (bot as any).chatTui;
+        if (typeof chatTui === 'function') chatTui(message);
+        else bot.chat(message);
     },
 
     async ginv({ bot, personality }) {
@@ -698,6 +708,7 @@ const commands: Record<string, CommandFn> = {
     },
 
     async gidle({ bot }) {
+        stopStare(bot);
         setMode('idle');
         setState(BotState.IDLE);
         clearAllControls(bot);
@@ -780,6 +791,106 @@ const commands: Record<string, CommandFn> = {
 
         addLog('system', `[TAB] ${players.length} player${players.length === 1 ? '' : 's'} online`);
         for (const row of rows) addLog('system', `[TAB] ${row}`);
+    },
+
+    // ── Chest-GUI automation (/shop, /sell, spawner menus) ──────────────────
+
+    async gscan(_ctx, _username, args) {
+        const sub = args[0]?.toLowerCase();
+        const enabled = sub === 'on' ? true : sub === 'off' ? false : !isScanMode();
+        setScanMode(enabled);
+        // Persist so the next launch starts in the same mode.
+        try {
+            const cfg = loadJson<Record<string, unknown>>('config.json');
+            if (cfg.gui && typeof cfg.gui === 'object') {
+                (cfg.gui as { debugWindows: boolean }).debugWindows = enabled;
+                saveJson('config.json', cfg);
+            }
+        } catch (err: any) {
+            addLog('error', `[GUI] Failed to persist scan mode: ${err?.message ?? err}`);
+        }
+        addLog('system', `[GUI] window-slot scanning ${enabled ? 'ON' : 'OFF'}`);
+        if (enabled) dumpCurrentWindow();
+    },
+
+    async gopen(_ctx, _username, args) {
+        const profile = args[0];
+        if (!profile) {
+            addLog('system', `[GUI] usage: gopen <profile> — profiles: ${getProfileNames().join(', ') || '(none configured)'}`);
+            return;
+        }
+        const ok = await openProfile(profile);
+        addLog('system', `[GUI] gopen ${profile} — ${ok ? 'window open' : 'could not open (see log)'}`);
+    },
+
+    async grun(_ctx, _username, args) {
+        const [profile, action] = args;
+        if (!profile || !action) {
+            addLog('system', '[GUI] usage: grun <profile> <action>');
+            return;
+        }
+        const ok = await runProfileAction(profile, action);
+        addLog('system', `[GUI] grun ${profile} ${action} — ${ok ? 'done' : 'failed (see log)'}`);
+    },
+
+    async gsell(_ctx, _username, args) {
+        const profile = args[0] ?? 'shop';
+        const action = args[1] ?? 'sell';
+        const ok = await runProfileAction(profile, action);
+        addLog('system', `[GUI] gsell — ${ok ? 'items sold' : 'sell failed (see log)'}`);
+    },
+
+    async gspawner(_ctx, _username, args) {
+        const block = args[0] ?? 'spawner';
+        addLog('system', `[GUI] gspawner — opening nearest ${block} to scan its window`);
+        const ok = await openAndScanBlock(block);
+        addLog('system', `[GUI] gspawner — ${ok ? `scanned ${block} window (slots logged above)` : 'failed (see log)'}`);
+    },
+
+    async gsdrop(_ctx, _username, _args) {
+        addLog('system', '[GUI] gsdrop — spawner GUI → chest → drop all');
+        const ok = await dropFromSpawner();
+        addLog('system', `[GUI] gsdrop — ${ok ? 'drop clicked (verify items dropped in-game)' : 'failed (see log)'}`);
+    },
+
+    async gotocord({ bot, personality, configureBaritone }, _username, args) {
+        if (BUSY_STATES.includes(getState())) { reply(personality.messages.busy); return; }
+
+        const coords = args.map(Number);
+        if (args.length < 3 || coords.slice(0, 3).some(n => Number.isNaN(n))) {
+            reply('Usage: gotocord <x> <y> <z>');
+            return;
+        }
+        const [x, y, z] = coords;
+        addLog('system', `[CMD] gotocord — walking to ${x}, ${y}, ${z}`);
+
+        try { bot.ashfinder.stop(); } catch {}
+        configureBaritone();
+        const nav = await safeGoto(bot, new baritoneGoals.GoalNear(new Vec3(x, y, z), 1), 30000);
+
+        if (nav.status === 'success') {
+            const p = bot.entity?.position;
+            reply(`Arrived at ${x}, ${y}, ${z} (now at ${p ? `${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}` : 'unknown position'})`);
+        } else {
+            reply(`Could not reach ${x}, ${y}, ${z} — ${nav.error?.message ?? nav.status}`);
+        }
+    },
+
+    async glook({ bot, personality, session }, _username, args) {
+        if (BUSY_STATES.includes(getState())) { reply(personality.messages.busy); return; }
+
+        const coords = args.map(Number);
+        if (args.length < 3 || coords.slice(0, 3).some(n => Number.isNaN(n))) {
+            reply('Usage: glook <x> <y> <z>');
+            return;
+        }
+        const [x, y, z] = coords;
+        addLog('system', `[CMD] glook — staring at ${x}, ${y}, ${z}`);
+
+        try { bot.ashfinder.stop(); } catch {}
+        setState(BotState.IDLE);
+        startStare(bot, new Vec3(x, y, z), session);
+        reply(`Staring at ${x}, ${y}, ${z} — use gidle to stop`);
     },
 };
 

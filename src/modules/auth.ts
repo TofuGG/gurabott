@@ -25,7 +25,7 @@
 
 import type { Bot } from 'mineflayer';
 import { addLog } from '../core/store.ts';
-import { sleep } from '../utils.ts';
+import { sleep, flattenChatComponent } from '../utils.ts';
 
 export interface GuiAuthConfig {
     // Substrings (case-insensitive) checked against the window title to
@@ -47,15 +47,13 @@ export interface AuthConfig {
     gui: GuiAuthConfig;
 }
 
-// Some servers send the window title as a JSON chat component
-// (e.g. {"text":"Login"}) instead of a plain string. Handle both.
+// Window titles can be a plain string, a JSON chat component, or a raw
+// prismarine-nbt node — flatten any of them to readable text.
 function titleToPlainText(title: unknown): string {
-    if (typeof title !== 'string') return String(title ?? '');
+    if (typeof title !== 'string') return flattenChatComponent(title as any);
     try {
         const parsed = JSON.parse(title);
-        if (parsed && typeof parsed === 'object') {
-            return parsed.text ?? title;
-        }
+        if (parsed && typeof parsed === 'object') return flattenChatComponent(parsed);
     } catch {
         // Not JSON — already plain text.
     }
@@ -74,7 +72,7 @@ function logWindowSlots(window: any): void {
     addLog('system', `[auth-debug] window opened — id=${window.id} type=${window.type} title="${title}"`);
     window.slots.forEach((item: any, index: number) => {
         if (!item) return;
-        const custom = item.customName ? ` custom="${item.customName}"` : '';
+        const custom = item.customName ? ` custom="${flattenChatComponent(item.customName)}"` : '';
         addLog('system', `[auth-debug]   slot ${index}: ${item.name} (${item.displayName})${custom}`);
     });
 }

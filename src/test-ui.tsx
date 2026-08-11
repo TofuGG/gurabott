@@ -101,9 +101,22 @@ assert('Input usable after Esc', footerLine().includes('ok'));
 await pressEsc();
 assert('Esc clears again', !footerLine().includes('ok'));
 
-// Esc with empty buffer exits
+// Esc with empty buffer arms a confirmation — it must NOT exit outright.
 await pressEsc();
-assert('Esc on empty exits', exits === 1, exits, 1);
+assert('Esc on empty arms confirm, no exit', exits === 0, exits, 0);
+assert('Exit confirmation hint shown', footerLine().includes('Press ESC again'));
+
+// Any other key cancels the pending exit confirmation.
+mockInput.pressArrow('down');
+await flush();
+assert('Other key cancels confirm', exits === 0, exits, 0);
+assert('Confirm hint cleared', !footerLine().includes('Press ESC again'));
+
+// After a cancel, Esc arms again and a second Esc confirms the exit.
+await pressEsc();
+assert('Esc re-arms after cancel', exits === 0, exits, 0);
+await pressEsc();
+assert('Second Esc exits', exits === 1, exits, 1);
 
 // Ctrl+C exits even with text in the buffer
 await mockInput.typeText('quit-anyway');

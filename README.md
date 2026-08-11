@@ -44,6 +44,7 @@ The default personality is **Hatsune Miku** (the world's most famous virtual ido
 ### 💬 AI & Chat Features
 - **Intelligent Responses** - AI understands context, game state, and conversation history
 - **Conversation Windows** - Mentioning the bot's name always gets a reply and opens a window of 3-5 follow-up replies from the same player; otherwise the bot stays quiet until spoken to again
+- **Discord Bridge** - Recognizes relayed Discord messages (`[Discord | <channel>] <rank> | <name> » <msg>`) so it can hear and reply to people on Discord; the same name-mention gating applies
 - **Custom Personality** - Edit `personality.json` to customize responses, character name, and behavior
 - **Optional AI** - Works perfectly fine without an API key (basic commands only)
 
@@ -98,12 +99,36 @@ Switching to `gidle` cancels any active combat/flee immediately.
 | `gcr <seconds>` | Hold sneak for duration |
 | `gwalk` | Move forward |
 
+### 🖥️ Chest-GUI Automation
+Many plugins (EssentialsShop, ChestShop, ShopGUI+, DeluxeMenus, spawner
+plugins...) expose trading through chest/inventory GUIs instead of chat
+commands. The bot can read and click them exactly like a real client:
+
+| Command | Function |
+|---------|----------|
+| `gscan [on\|off]` | Toggle window-slot scanning — dumps every opened GUI (title, type, each slot's name/custom name/lore) so you can map a layout |
+| `gopen <profile>` | Open a configured GUI (chat command or right-clicking a block) |
+| `grun <profile> <action>` | Run a configured click sequence on an open GUI |
+| `gsell` | Shortcut: open `/sell` and run the profile's `sell` action |
+| `gspawner` | Open the nearest spawner GUI and dump its layout |
+| `gsdrop` | Spawner GUI → chest button → "drop all" (empties all stored drops) |
+
+GUI behaviour is configured under `config.json → gui.profiles`. A profile
+declares how the window opens, which title identifies it, and named click
+sequences (absolute slots or "first slot whose item matches this
+name/custom-name/lore", with optional shift-click). `gsdrop` verifies the
+drop actually happened — it tries left/shift/right/double-click and reports
+which one emptied the GUI (on many servers the "drop all" button requires a
+**shift-click**).
+
 ### 🔍 Utility Commands
 | Command | Function |
 |---------|----------|
 | `gcords` | Get current coordinates |
 | `gping` | Check connection ping |
 | `gtp <x> <y> <z>` | Teleport (requires permissions) |
+| `gotocord <x> <y> <z>` | Walk to coordinates using pathfinding |
+| `glook <x> <y> <z>` | Lock the bot's head on a position and freeze its behavior until `gidle` |
 | `ghelp` | Show all commands |
 | `gsay <message>` | Make bot say something |
 
@@ -161,6 +186,12 @@ chmod +x index.js scripts/run.mjs
 
 `node-runtime/` is gitignored and **optional** on any platform — without it
 the bot uses the system Node.
+
+**Terminal UI controls:** the bottom prompt runs commands (`ghelp` lists them).
+`↑/↓` walk history, Enter runs, `Ctrl+C` exits unconditionally, and `Esc`
+clears the prompt — on an empty prompt `Esc` asks for confirmation first
+(`Esc` again to quit, any other key to cancel), so it never kills the bot
+by accident.
 
 ### Installation
 
@@ -232,6 +263,8 @@ npm start
 | `behaviorMode` | string | Default behavior mode on join: `idle`, `attack`, or `free` (default: `idle`) |
 | `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
 | `action.retryDelay` | number | Reconnect delay (ms) |
+| `gui.debugWindows` | boolean | Auto-dump every opened GUI window on launch (`gscan on` persists here) |
+| `gui.profiles.*` | object | Chest-GUI profiles: title match, how the window opens, and named click sequences (see "Chest-GUI Automation") |
 
 ---
 

@@ -16,6 +16,7 @@ import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initGuardrails, isGuardrailsEnabled } from './modules/guardrails.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
+import { initGui } from './modules/gui.ts';
 import { installProtocolFix } from './protocolFix.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI, resetMovementSuppression } from './movementAI.ts';
@@ -402,7 +403,9 @@ export function createBot(
     // Every outgoing message goes through this wrapper: no code path (AI,
     // commands, personality messages) can ever make the bot send a tpa
     // command — neither an accept (/tpa accept, /tpaccept) nor a request
-    // (/tpa, /tpahere) — nor any message containing profanity.
+    // (/tpa, /tpahere) — nor any message containing profanity. The ONE
+    // exception is gsay (operator-driven chat), which uses bot.chatTui and is
+    // allowed to send /tpa.
     //
     // mineflayer injects its plugins (including `chat`) only after the
     // connection's protocol version is resolved (the 'inject_allowed' event),
@@ -417,21 +420,34 @@ export function createBot(
         // being typed rather than instantly emitted. Scoped per-connection so a
         // reconnect starts a fresh queue.
         let sendQueue: Promise<void> = Promise.resolve();
+        const queueSend = (message: string) => {
+            const typingMs = typingDelayMs(message.length) + Math.random() * 200;
+            sendQueue = sendQueue.then(async () => {
+                await sleep(typingMs);
+                try { (rawChat as any)(message); } catch {}
+            });
+        };
         bot.chat = ((message: string) => {
-        if (isTpaCommand(message)) {
-            addLog('warn', `[BOT] Blocked tpa command from being sent: ${message}`);
-            return;
-        }
-        if (containsProfanity(message)) {
-            addLog('warn', `[BOT] Blocked message containing profanity: ${message}`);
-            return;
-        }
-        const typingMs = typingDelayMs(message.length) + Math.random() * 200;
-        sendQueue = sendQueue.then(async () => {
-            await sleep(typingMs);
-            try { (rawChat as any)(message); } catch {}
-        });
+            if (isTpaCommand(message)) {
+                addLog('warn', `[BOT] Blocked tpa command from being sent: ${message}`);
+                return;
+            }
+            if (containsProfanity(message)) {
+                addLog('warn', `[BOT] Blocked message containing profanity: ${message}`);
+                return;
+            }
+            queueSend(message);
         }) as any;
+        // Only the operator's gsay may send tpa commands (/tpa, /tpahere,
+        // /tpaccept) — every other path (AI, personality, other commands) stays
+        // blocked by the guarded bot.chat above. Profanity is still blocked.
+        (bot as any).chatTui = (message: string) => {
+            if (containsProfanity(message)) {
+                addLog('warn', `[BOT] Blocked message containing profanity: ${message}`);
+                return;
+            }
+            queueSend(message);
+        };
     });
 
     bot.loadPlugin(baritonePlugin.loader);
@@ -450,6 +466,9 @@ export function createBot(
         gui: { titleMatch: ['login', 'register', 'authme'], slotMap: {}, clickDelayMs: 500 },
     };
     initAuth(bot, authConfig);
+
+    const guiConfig = (CONFIG as any).gui ?? { debugWindows: false, profiles: {} };
+    initGui(bot, guiConfig, session as BotSession, configureBaritone);
 
     // ── Events ──────────────────────────────────────────────────────────────
 
@@ -667,37 +686,39 @@ export function createBot(
         const budget = conversationBudget[username] ?? 0;
         const windowOpen = budget > 0;
 
-        // Two-session AI model:
-        //   A message that names the bot is ALWAYS directed — a name call-out
-        //   must never be ignored, so it short-circuits without a classifier
-        //   call (also keeps the gate from wrongly rejecting "miku say...").
-        //   Only messages WITHOUT the name go through Session 2 (classifier),
-        //   which decides if e.g. "hello!" is aimed at the bot. Only a YES
-        //   reaches Session 1 (conversation). A NO never consumes the window,
-        //   so bystander chat can't shrink it.
-        //   If the classifier has no opinion (disabled / rate-limited / error)
-        //   we fall back to the old heuristic: open window.
+        // AI is only spent on a bounded window: the message that names the bot
+        // is ALWAYS directed (a name call-out must never be ignored, so it
+        // short-circuits without a classifier call), and the next 3 messages
+        // from that player — and only those — go through Session 2 (classifier)
+        // to decide if e.g. "hello!" is aimed at the bot. Everything outside
+        // the window gets no AI call and is ignored, so bystander chat can't
+        // burn Groq quota.
+        //   The window shrinks on EVERY message inside it (not just directed
+        // ones), so exactly 3 follow-ups are verified per mention. If the
+        // classifier has no opinion (disabled / rate-limited / error) inside
+        // the window we fall back to the open-window heuristic.
         let directed: boolean | null;
         if (nameMentioned) {
             directed = true;
-        } else if (AI_ENABLED && aiCtx) {
+        } else if (AI_ENABLED && aiCtx && windowOpen) {
             directed = await isMessageDirected(aiCtx, bot.username, username, message);
         } else {
             directed = null;
         }
+
+        // Open/refresh the window on a mention; shrink it on every message
+        // inside the window (literal 3 follow-ups), even if it's not directed.
+        if (nameMentioned) {
+            conversationBudget[username] = 3;
+        } else if (windowOpen) {
+            conversationBudget[username] = budget - 1;
+        }
+
         const shouldReply = directed ?? windowOpen;
 
         if (!shouldReply) {
             addLog('chat', `[AI] "${message.slice(0, 40)}" not directed at the bot — ignored`);
             return;
-        }
-
-        // Open/refresh the window on any directed opener (mention or not);
-        // shrink it on directed follow-ups inside an existing window.
-        if (nameMentioned || !windowOpen) {
-            conversationBudget[username] = 3 + Math.floor(Math.random() * 3);
-        } else {
-            conversationBudget[username] = budget - 1;
         }
 
         // Guardrails: block prompt-injection attempts that try to rewrite the

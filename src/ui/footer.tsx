@@ -2,8 +2,9 @@
  * footer.tsx — bottom control surface with a live command prompt.
  *
  * An OpenTUI `<input>` owns the command line: type to edit, Enter to submit,
- * ↑/↓ to walk history. Esc clears the buffer (or exits when it's already
- * empty) and Ctrl+C exits unconditionally.
+ * ↑/↓ to walk history. Esc clears the buffer (or, on an already-empty buffer,
+ * arms a two-step exit confirmation — a second Esc confirms, any other key
+ * cancels) and Ctrl+C exits unconditionally.
  *
  * KEY DISPATCH: OpenTUI delivers key events to global `keyInput` listeners
  * BEFORE the focused renderable (the input) gets them, so the `useKeyboard`
@@ -18,17 +19,27 @@ import { useKeyboard } from '@opentui/solid';
 import { onMount } from 'solid-js/dist/solid.js';
 import { theme } from './theme.ts';
 
-type AnyInput = { value: string; focus: () => void };
+type AnyInput = { value: string; placeholder: string; focus: () => void };
 
 const HISTORY_LIMIT = 100;
+const DEFAULT_PLACEHOLDER = 'Type a command — e.g. ghelp, status, quit';
+const CONFIRM_PLACEHOLDER = 'Press ESC again to confirm exit — any other key cancels';
 
 export function Footer(props: { onCommand: (cmd: string, args: string[]) => void | Promise<void>; onExit: () => void }) {
     let inputEl: AnyInput | null = null;
     const history: string[] = [];
     let histIdx = -1;
+    let confirmExit = false;
 
     const setValue = (v: string): void => {
         if (inputEl && inputEl.value !== v) inputEl.value = v;
+    };
+
+    const setConfirm = (on: boolean): void => {
+        confirmExit = on;
+        if (inputEl && inputEl.placeholder !== (on ? CONFIRM_PLACEHOLDER : DEFAULT_PLACEHOLDER)) {
+            inputEl.placeholder = on ? CONFIRM_PLACEHOLDER : DEFAULT_PLACEHOLDER;
+        }
     };
 
     const submit = (raw: string): void => {
@@ -45,6 +56,26 @@ export function Footer(props: { onCommand: (cmd: string, args: string[]) => void
     };
 
     useKeyboard((key) => {
+        if (key.name === 'escape') {
+            if (confirmExit) {
+                // Second Esc on the empty buffer confirms the exit.
+                key.stopPropagation();
+                setConfirm(false);
+                props.onExit();
+            } else if (inputEl && inputEl.value) {
+                // First Esc with text typed: clear the buffer.
+                key.stopPropagation();
+                setValue('');
+            } else {
+                // First Esc on an empty buffer: arm the confirmation instead of
+                // exiting outright — an accidental Esc no longer kills the bot.
+                key.stopPropagation();
+                setConfirm(true);
+            }
+            return;
+        }
+        // Any other key cancels a pending exit confirmation.
+        setConfirm(false);
         if (key.name === 'up') {
             key.stopPropagation();
             if (histIdx === -1) histIdx = history.length;
@@ -63,13 +94,6 @@ export function Footer(props: { onCommand: (cmd: string, args: string[]) => void
                     setValue(history[histIdx]);
                 }
             }
-        } else if (key.name === 'escape') {
-            if (inputEl && inputEl.value) {
-                key.stopPropagation();
-                setValue('');
-            } else {
-                props.onExit();
-            }
         }
     });
 
@@ -87,7 +111,7 @@ export function Footer(props: { onCommand: (cmd: string, args: string[]) => void
                 <input
                     flexGrow={1}
                     focused
-                    placeholder="Type a command — e.g. ghelp, status, quit"
+                    placeholder={DEFAULT_PLACEHOLDER}
                     placeholderColor={theme.footer.hint}
                     backgroundColor={theme.footer.bg}
                     focusedBackgroundColor={theme.footer.bg}
@@ -96,7 +120,7 @@ export function Footer(props: { onCommand: (cmd: string, args: string[]) => void
                     onSubmit={(v: any) => submit(typeof v === 'string' ? v : '')}
                     ref={(n: any) => { inputEl = n; }}
                 />
-                <text content="Enter run · ↑/↓ history · Esc/Ctrl+C quit" flexShrink={0} style={{ fg: theme.footer.hint }} />
+                <text content="Enter run · ↑/↓ history · Esc Esc quit · Ctrl+C quit" flexShrink={0} style={{ fg: theme.footer.hint }} />
             </box>
         </box>
     );

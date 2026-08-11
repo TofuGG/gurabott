@@ -129,6 +129,22 @@ export function flattenChatComponent(comp: any): string {
     if (comp == null) return '';
     if (typeof comp === 'string') return comp;
     if (Array.isArray(comp)) return comp.map(c => flattenChatComponent(c)).join('');
+    // Raw prismarine-nbt node: { type, value }. Used for 1.20.5+ item custom
+    // names/lores and some window titles. A compound's value maps keys to
+    // child nodes; read the text-like keys so `color`/`bold` noise is skipped.
+    if (typeof comp.type === 'string' && comp.type !== 'text' && 'value' in comp) {
+        const v = comp.value;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+        if (Array.isArray(v)) return v.map(c => flattenChatComponent(c)).join('');
+        if (v && typeof v === 'object') {
+            if ('value' in v) return flattenChatComponent(v); // wrapped list/compound
+            let out = '';
+            for (const key of ['text', 'extra', 'with']) {
+                if (v[key] !== undefined) out += flattenChatComponent(v[key]);
+            }
+            return out;
+        }
+    }
     let out = '';
     if (typeof comp.text === 'string') out += comp.text;
     if (comp.json && typeof comp.json === 'object' && typeof comp.json[''] === 'string') out += comp.json[''];
@@ -331,10 +347,42 @@ export function parseChatMessage(jsonMsg: any, botUsername: string): ParsedChat 
     const text = jsonMsg.toString?.() ?? (typeof jsonMsg === 'string' ? jsonMsg : '');
     if (!text) return null;
     const m = text.match(/^<([^>]+)>\s*(.*)/);
-    if (!m) return null;
-    const username = m[1].trim();
-    const message = m[2].trim();
-    if (!message || username === botUsername) return null;
+    if (m) {
+        const username = m[1].trim();
+        const message = m[2].trim();
+        if (message && username !== botUsername) return { username, message };
+    }
+
+    // (5) Discord bridge ("[Discord | <channel>] <rank> | <name> » <msg>").
+    const discord = parseDiscordMessage(text);
+    if (discord) {
+        if (discord.username.toLowerCase() === botUsername.toLowerCase()) return null; // own echo
+        return discord;
+    }
+    return null;
+}
+
+/**
+ * Parse a Discord-bridge chat line ("[Discord | <channel>] <rank> | <name> »
+ * <message>") into its sender and content. Returns null when the line isn't a
+ * Discord message. Handles the common rank layouts: "rank | name", "name",
+ * and name-with-spaces followed by the » separator.
+ */
+export function parseDiscordMessage(text: string): { username: string; message: string } | null {
+    if (!text) return null;
+    // Prefix is "[Discord]" or "[Discord | <channel>]"; the sender part is
+    // everything up to the » separator, which carries the Discord display name
+    // (optionally after a rank/role: "rank | name").
+    const match = text.match(/^\[discord[^\]]*\]\s*(.*?)\s*»\s*(.+)$/i);
+    if (!match) return null;
+    const userPart = match[1].trim();
+    const message = match[2].trim();
+    if (!userPart || !message) return null;
+    // Discord display names cannot contain "|", so the last pipe-separated
+    // segment is the name (roles come first, e.g. "Helper | Blanc").
+    const segments = userPart.split('|').map((s) => s.trim()).filter(Boolean);
+    const username = segments[segments.length - 1] ?? '';
+    if (!username) return null;
     return { username, message };
 }
 
