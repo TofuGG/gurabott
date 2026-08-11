@@ -227,6 +227,8 @@ cp config.json.example config.json
   },
   "greeting": true,
   "autoReconnect": true,
+  "behaviorMode": "idle",
+  "guardrails": true,
   "mcp": {
     "enabled": true,
     "host": "127.0.0.1",
@@ -234,6 +236,10 @@ cp config.json.example config.json
   },
   "action": {
     "retryDelay": 5000
+  },
+  "gui": {
+    "debugWindows": false,
+    "profiles": {}
   }
 }
 ```
