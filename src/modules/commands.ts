@@ -14,6 +14,7 @@ import { getMode, setMode, type BotMode } from './mode.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
 import { suppressMovement, resumeMovement, startStare, stopStare } from '../movementAI.ts';
 import { openProfile, runProfileAction, setScanMode, isScanMode, dumpCurrentWindow, getProfileNames, openAndScanBlock, dropFromSpawner } from './gui.ts';
+import { replayPath } from './pathRecorder.ts';
 import { BotSession } from '../session.ts';
 import { RESOURCE_GROUPS, DOOR_NAMES, BLOCK_DROPS } from '../constants.ts';
 import { getBestToolForBlock, waitForPickup, getBestWeapon } from './mining.ts';
@@ -92,6 +93,7 @@ const commands: Record<string, CommandFn> = {
             'gfollow <player>, gcraft <item>, gdump, gkill <mob|player>, glast, gsfollow',
             'gcollect <wood|stone|dirt> <amount>, gsleep, gopendoor, gscollect, gtab, gfilter, greset',
             'gscan, gopen <profile>, grun <profile> <action>, gsell, gspawner (open+scan spawner GUI), gsdrop (spawner → chest → drop all)',
+            'gpath <route.json> (walk a recorded route), gsellpath <route.json> (route then sell)',
             'gotocord <x> <y> <z>, glook <x> <y> <z> (stare until gidle)',
         ];
         for (const line of helpMessages) {
@@ -838,6 +840,25 @@ const commands: Record<string, CommandFn> = {
         const action = args[1] ?? 'sell';
         const ok = await runProfileAction(profile, action);
         addLog('system', `[GUI] gsell — ${ok ? 'items sold' : 'sell failed (see log)'}`);
+    },
+
+    async gpath({ bot }, _username, args) {
+        const file = args[0];
+        if (!file) { reply('Usage: gpath <route.json>'); return; }
+        addLog('system', `[CMD] gpath — replaying route "${file}"`);
+        const ok = await replayPath(bot, file);
+        reply(`Route replay ${ok ? 'complete' : 'failed (see log)'}`);
+    },
+
+    async gsellpath({ bot }, _username, args) {
+        const file = args[0];
+        if (!file) { reply('Usage: gsellpath <route.json>'); return; }
+        addLog('system', `[CMD] gsellpath — replaying route "${file}" then selling`);
+        const walked = await replayPath(bot, file);
+        if (!walked) { reply('Route replay failed — not selling (see log)'); return; }
+        const ok = await runProfileAction('shop', 'sell');
+        addLog('system', `[GUI] gsellpath — ${ok ? 'items sold' : 'sell failed (see log)'}`);
+        reply(`gsellpath ${ok ? 'complete' : 'failed (see log)'}`);
     },
 
     async gspawner(_ctx, _username, args) {

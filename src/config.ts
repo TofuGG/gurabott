@@ -172,6 +172,8 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         if (!config.gui) {
             config.gui = { debugWindows: false, profiles: {} };
         }
+        if (config.gui.autoGsdrop === undefined) config.gui.autoGsdrop = true;
+        if (config.gui.autoSell === undefined) config.gui.autoSell = true;
         // Persist the backfilled config so bot.ts's loadJson() (which re-reads
         // the file from disk) sees the same fixes instead of a stale legacy
         // file that still crashes createBot (e.g. missing action.retryDelay).

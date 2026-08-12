@@ -16,7 +16,7 @@ import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initGuardrails, isGuardrailsEnabled } from './modules/guardrails.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
-import { initGui } from './modules/gui.ts';
+import { initGui, startAutoDropSpawner, startAutoSell } from './modules/gui.ts';
 import { installProtocolFix } from './protocolFix.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI, resetMovementSuppression } from './movementAI.ts';
@@ -764,6 +764,12 @@ export function createBot(
             intervals,
             waterHelpMessages: (PERSONALITY as any).messages?.waterHelp ?? [],
         });
+
+        // ── Auto gsdrop (30-minute cadence, drains the spawner) ─────────────
+        startAutoDropSpawner({ intervals });
+
+        // ── Auto gsell (30-minute cadence, sells inventory via /sell) ───────
+        startAutoSell({ intervals });
 
         startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, session!, () => isEscapingStuck, getMode);
         addLog('system', '[BOT] Movement AI started');

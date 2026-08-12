@@ -18,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { onLog, addLog, type LogEntry } from './store.ts';
-import { formatLogDateTime, LOG_TIME_ZONE } from '../utils.ts';
+import { formatLogDateTime, formatLogTime, LOG_TIME_ZONE } from '../utils.ts';
 
 export const KEEP_LAST_N = 10;
 export const LATEST_FILE = 'Latest_Log.txt';
@@ -43,9 +43,13 @@ export function buildRunFileName(now: Date, username: string): string {
     return `${stamp}-${safeUser}.log`;
 }
 
-/** One log line: JSON so multi-line text and quotes survive a round-trip. */
+/**
+ * One log line: a human-readable `HH:MM:SS` stamp (same as the TUI) followed by
+ * the JSON entry, so multi-line text and quotes survive a round-trip while the
+ * line stays greppable/readable by eye.
+ */
 export function formatLogLine(entry: LogEntry): string {
-    return `${JSON.stringify(entry)}\n`;
+    return `[${formatLogTime(entry.ts)}] ${JSON.stringify(entry)}\n`;
 }
 
 function pruneOldRunFiles(): void {

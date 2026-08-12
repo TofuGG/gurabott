@@ -32,6 +32,8 @@ import baritonePlugin from '@miner-org/mineflayer-baritone';
 import { Vec3 } from 'vec3';
 import { addLog } from '../core/store.ts';
 import { sleep, safeGoto, withTimeout, flattenChatComponent } from '../utils.ts';
+import { startStare, stopStare, isStaring, suppressMovement, resumeMovement } from '../movementAI.ts';
+import { BotState, getState } from './state.ts';
 import type { BotSession } from '../session.ts';
 
 const baritoneGoals = baritonePlugin.goals;
@@ -85,6 +87,15 @@ export interface GuiProfileConfig {
 export interface GuiConfig {
     debugWindows: boolean;
     profiles: Record<string, GuiProfileConfig>;
+    /** Run the 30-minute auto gsdrop (spawner → chest → drop all) until the
+     *  spawner is empty. Defaults to on when unset. */
+    autoGsdrop?: boolean;
+    /** Run the 30-minute auto gsell (shop profile "sell" action). Defaults to
+     *  on when unset. */
+    autoSell?: boolean;
+    /** Recorded route (waypoint JSON) walked before opening the shop during an
+     *  auto-sell, so the bot reaches a reach-anchored sell spot. */
+    sellPath?: string | null;
 }
 
 // ── Pure helpers (unit-tested) ────────────────────────────────────────────────
@@ -172,6 +183,16 @@ let session: BotSession | null = null;
 let scanMode = false;
 let busy = false;
 let configureBaritone: (overrides?: Record<string, any>) => void = () => {};
+
+// Auto-drop state: `lastDropStoredCount` is how many stored drops the most
+// recent dropFromSpawner() round found in the submenu (0 = spawner empty), and
+// `autoDropRunning` prevents two scheduled runs from overlapping.
+let lastDropStoredCount = 0;
+let autoDropRunning = false;
+
+// Auto-sell state: `autoSellRunning` prevents two scheduled runs from
+// overlapping (auto gsdrop and auto sell share the `busy` flag).
+let autoSellRunning = false;
 
 // 1.17+ servers gate every container click on a per-window `stateId`; a click
 // carrying a stale stateId is silently dropped. mineflayer keeps ONE global
@@ -440,6 +461,8 @@ export function initGui(
         session = null;
         busy = false;
         stateIdByWindow.clear();
+        lastDropStoredCount = 0;
+        autoDropRunning = false;
     });
 }
 
@@ -688,6 +711,7 @@ export async function dropFromSpawner(): Promise<boolean> {
     if (!b) return false;
 
     busy = true;
+    let startedStare = false;
     try {
         // 1. Get the spawner root GUI. If a window is already open, only reuse
         // it when it's actually the root spawner GUI (it has the chest button);
@@ -706,7 +730,20 @@ export async function dropFromSpawner(): Promise<boolean> {
             if (!opened) return false;
             window = opened.window;
             spawnerPos = opened.blockPos;
+        } else {
+            // Window reused from a previous run — re-resolve the spawner block
+            // so the stare keeps the bot facing it (not the players) through
+            // the drop and the 5s pause after it.
+            spawnerPos = findBlockNamed('spawner', 32)?.position ?? null;
         }
+
+        // Lock the head on the spawner for the whole interaction + 5s after the
+        // drop. This freezes player-glance/greet/wander behaviors in
+        // movementAI (stareTarget gate) so dropped bones land toward the
+        // water instead of toward whoever walked up to the bot. If the user is
+        // already in a manual glook stare, leave their stare alone.
+        startedStare = spawnerPos !== null && !isStaring();
+        if (startedStare) startStare(b, spawnerPos!, session!);
 
         // 2. Click the chest button to reach the drop submenu.
         const chestSlot = findSlotByItemName(window, 'chest');
@@ -733,6 +770,7 @@ export async function dropFromSpawner(): Promise<boolean> {
         }
         const submenu = b.currentWindow;
         const drops = storedDropSlots(submenu);
+        lastDropStoredCount = drops.size;
         if (drops.size === 0) {
             addLog('system', '[GUI] no stored drops in the submenu — nothing to verify');
         } else {
@@ -791,7 +829,153 @@ export async function dropFromSpawner(): Promise<boolean> {
         return true;
     } finally {
         busy = false;
+        // Keep staring at the spawner for 5s after the drop completes so the
+        // bot doesn't rotate toward a passing player while the dropped items
+        // are still landing (they should fall toward the water, not players).
+        if (startedStare) {
+            try { await sleep(5000); } catch {}
+            stopStare(b);
+        }
     }
+}
+
+// ── Auto gsdrop (30-minute cadence) ──────────────────────────────────────────
+
+export const AUTO_DROP_INTERVAL_MS = 30 * 60 * 1000;
+export const AUTO_DROP_FIRST_DELAY_MS = 20 * 1000;
+export const AUTO_SELL_INTERVAL_MS = 30 * 60 * 1000;
+export const AUTO_SELL_FIRST_DELAY_MS = 15 * 1000;
+
+/**
+ * Drain the spawner's drop chest until it's empty (the 30-minute auto task).
+ *
+ * The submenu can hold 2–3 pages of stored drops, so one drop cycle may not
+ * clear everything: each `dropFromSpawner()` round re-opens the root GUI and
+ * re-enters the chest submenu, and reports how many stored drops it found. A
+ * round that finds zero means the spawner is drained; otherwise we run again,
+ * capped at `maxRounds` so an unexpected pagination layout can't loop forever.
+ *
+ * Each round is logged with the `[auto]` tag so automated runs are
+ * distinguishable from manual `[SHELL] gsdrop` invocations.
+ */
+export async function autoDropFromSpawner(maxRounds = 6): Promise<void> {
+    if (autoDropRunning) { addLog('warn', '[auto] gsdrop already running — skipping'); return; }
+    if (busy) { addLog('warn', '[auto] gsdrop skipped — GUI busy'); return; }
+    const b = bot;
+    if (!b?.entity || (b.health ?? 0) <= 0) {
+        addLog('warn', '[auto] gsdrop skipped — bot not ready (dead/not connected)');
+        return;
+    }
+    const state = getState();
+    if (state !== BotState.IDLE && state !== BotState.FOLLOWING) {
+        addLog('warn', `[auto] gsdrop skipped — state is ${state}, waiting for the next tick`);
+        return;
+    }
+
+    autoDropRunning = true;
+    try {
+        for (let round = 1; round <= maxRounds; round++) {
+            addLog('system', `[auto] gsdrop — round ${round}`);
+            const ok = await dropFromSpawner();
+            if (!ok) {
+                addLog('warn', `[auto] gsdrop round ${round} failed — stopping`);
+                return;
+            }
+            if (lastDropStoredCount === 0) {
+                addLog('system', '[auto] spawner empty — auto drop complete');
+                return;
+            }
+            addLog('system', `[auto] round ${round} dropped ${lastDropStoredCount} item(s) — more may remain, retrying`);
+        }
+        addLog('warn', `[auto] reached ${maxRounds} rounds without confirming empty — stopping (possible pagination issue)`);
+    } finally {
+        autoDropRunning = false;
+    }
+}
+
+/**
+ * Start the 30-minute auto-gsdrop scheduler: one run shortly after spawn, then
+ * every AUTO_DROP_INTERVAL_MS. Timers are pushed into `intervals[]` so a
+ * disconnect/end clears them with every other connection-owned interval.
+ */
+export function startAutoDropSpawner(opts: { intervals: NodeJS.Timeout[] }): void {
+    const { intervals } = opts;
+
+    const run = (): void => {
+        if (cfg?.autoGsdrop === false) return;
+        if (busy) { addLog('warn', '[auto] gsdrop skipped — GUI busy'); return; }
+        addLog('system', '[auto] gsdrop — scheduled task fired');
+        void autoDropFromSpawner();
+    };
+
+    intervals.push(setTimeout(run, AUTO_DROP_FIRST_DELAY_MS));
+    intervals.push(setInterval(run, AUTO_DROP_INTERVAL_MS));
+}
+
+/**
+ * Run the auto-sell: walk the recorded route to the shop (if
+ * config.gui.sellPath is set), then open the shop profile and run its "sell"
+ * action. Logged with the `[auto]` tag so automated runs are distinguishable
+ * from manual `[SHELL] gsell` invocations. Returns true when the sell action
+ * completed successfully.
+ */
+export async function autoSellFromShop(): Promise<boolean> {
+    if (autoSellRunning) { addLog('warn', '[auto] gsell already running — skipping'); return false; }
+    if (busy) { addLog('warn', '[auto] gsell skipped — GUI busy'); return false; }
+    const b = bot;
+    if (!b?.entity || (b.health ?? 0) <= 0) {
+        addLog('warn', '[auto] gsell skipped — bot not ready (dead/not connected)');
+        return false;
+    }
+    const state = getState();
+    if (state !== BotState.IDLE && state !== BotState.FOLLOWING) {
+        addLog('warn', `[auto] gsell skipped — state is ${state}, waiting for the next tick`);
+        return false;
+    }
+
+    autoSellRunning = true;
+    try {
+        const pathFile = cfg?.sellPath;
+        if (pathFile) {
+            const { replayPath } = await import('./pathRecorder.ts');
+            suppressMovement(b);
+            let walked = false;
+            try {
+                walked = await replayPath(b, pathFile, { tag: 'auto' });
+            } finally {
+                resumeMovement();
+            }
+            if (!walked) {
+                addLog('warn', '[auto] gsell skipped — could not walk the recorded route to the shop');
+                return false;
+            }
+        }
+        const ok = await runProfileAction('shop', 'sell');
+        addLog('system', `[auto] gsell — ${ok ? 'items sold' : 'sell failed (see log)'}`);
+        return ok;
+    } finally {
+        autoSellRunning = false;
+    }
+}
+
+/**
+ * Start the 30-minute auto-sell scheduler: one run shortly after spawn (offset
+ * from the auto-gsdrop first delay so the two never fire on the same tick),
+ * then every AUTO_SELL_INTERVAL_MS. Timers are pushed into `intervals[]` so a
+ * disconnect/end clears them with every other connection-owned interval.
+ */
+export function startAutoSell(opts: { intervals: NodeJS.Timeout[] }): void {
+    const { intervals } = opts;
+
+    const run = (): void => {
+        if (cfg?.autoSell === false) return;
+        if (busy) { addLog('warn', '[auto] gsell skipped — GUI busy'); return; }
+        addLog('system', '[auto] gsell — scheduled task fired');
+        void autoSellFromShop();
+    };
+
+    intervals.push(setTimeout(run, AUTO_SELL_FIRST_DELAY_MS));
+    intervals.push(setInterval(run, AUTO_SELL_INTERVAL_MS));
 }
 
 /**

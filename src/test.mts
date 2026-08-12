@@ -2,7 +2,7 @@
 import { BotState, getState, setState, onStateChange, resetState } from './modules/state.ts';
 import { parseMode } from './modules/mode.ts';
 import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from './modules/ai.ts';
-import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE, parseChatMessage, parseDiscordMessage } from './utils.ts';
+import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE, parseChatMessage, parseDiscordMessage, formatLogTime } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
 import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates } from './modules/gui.ts';
@@ -368,7 +368,8 @@ await section('Log File Naming + Format', async () => {
     assert('undefined username -> bot', buildRunFileName(now, undefined as any).endsWith('-bot.log'));
 
     const line = formatLogLine({ type: 'chat', text: 'hi "there" \n line2', ts: 42 });
-    assert('JSON round-trip', JSON.parse(line).text === 'hi "there" \n line2');
+    assert('TUI-style timestamp prefix', line.startsWith(`[${formatLogTime(42)}] `), line);
+    assert('JSON round-trip', JSON.parse(line.slice(line.indexOf('{'))).text === 'hi "there" \n line2');
     assert('Single physical line', line.split('\n').length === 2, line.split('\n').length, 2);
     assert('Line ends with newline', line.endsWith('\n'));
     assert('Retention keeps last 10', KEEP_LAST_N === 10, KEEP_LAST_N, 10);
