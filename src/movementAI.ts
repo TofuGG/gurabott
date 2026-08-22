@@ -8,6 +8,7 @@ import { Vec3 } from 'vec3';
 import { sleep, safeGoto } from './utils.ts';
 import { BotSession } from './session.ts';
 import { addLog } from './core/store.ts';
+import { setGazeLock, clearGazeLock } from './core/gazeLock.ts';
 import type { BotMode } from './modules/mode.ts';
 
 // ── Movement suppression ───────────────────────────────────────────────────────
@@ -55,6 +56,11 @@ export function startStare(bot: Mineflayer.Bot, pos: Vec3, session: BotSession):
     stareTarget = pos;
     const token = ++stareToken;
     addLog('movement', `[MOV] staring at ${pos.floored()}`);
+    // Arm the gaze enforcer (core/gazeLock.ts): while staring, ANY look that
+    // deviates >30° from this target is rewritten to it — baritone's
+    // resurrecting executor (_walkTo force-looks every tick) can no longer
+    // rotate the head away mid-drop.
+    setGazeLock(pos.offset(0.5, 0.5, 0.5));
     // Stand still: cancel any path, release all movement keys and sneaking.
     try { bot.ashfinder?.stop?.(); } catch {}
     const controls = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
@@ -62,6 +68,9 @@ export function startStare(bot: Mineflayer.Bot, pos: Vec3, session: BotSession):
     const loop = async () => {
         while (session.alive && token === stareToken && bot.entity) {
             try { await bot.lookAt(pos.offset(0.5, 0.5, 0.5), false); } catch {}
+            // A resurrected baritone executor re-sets forward/sprint on EVERY
+            // tick — clear them again each loop pass so the stare stays parked.
+            for (const c of controls) try { bot.setControlState(c, false); } catch {}
             await sleep(600 + Math.random() * 600);
         }
     };
@@ -71,6 +80,7 @@ export function startStare(bot: Mineflayer.Bot, pos: Vec3, session: BotSession):
 export function stopStare(bot?: Mineflayer.Bot): void {
     stareTarget = null;
     stareToken++;
+    clearGazeLock();
     if (bot) {
         try { bot.setControlState('sneak', false); } catch {}
     }

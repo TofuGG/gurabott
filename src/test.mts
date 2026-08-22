@@ -5,7 +5,8 @@ import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from '.
 import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE, parseChatMessage, parseDiscordMessage, formatLogTime } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
-import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates, normalizeAutoDropIntervalSec, normalizeAutoDropRounds, AUTO_DROP_FIRST_DELAY_MS } from './modules/gui.ts';
+import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates, normalizeAutoDropIntervalSec, normalizeAutoDropRounds, parseStoragePageTitle, AUTO_DROP_FIRST_DELAY_MS } from './modules/gui.ts';
+import { cosineBetween } from './core/gazeLock.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -538,6 +539,20 @@ await section('Auto-gsdrop Rounds Config', async () => {
     assert('Tiny fraction floors then clamps to min 1', normalizeAutoDropRounds(0.5) === 1);
 });
 
+// SPAWNER STORAGE TITLE PAGINATION (pure helper — the drop confirmation source)
+await section('Spawner Storage Title Parsing', async () => {
+    assert('Plain title parsed', JSON.stringify(parseStoragePageTitle('Spawner Storage - [3/5]')) === '{"page":3,"total":5}');
+    assert('Leading marker parsed', JSON.stringify(parseStoragePageTitle('[1/5] SPAWNER STORAGE')) === '{"page":1,"total":5}');
+    assert('Spaces around slash tolerated', JSON.stringify(parseStoragePageTitle('Storage [2 / 7]')) === '{"page":2,"total":7}');
+    assert('Single page parsed (caller must treat as unverifiable)', JSON.stringify(parseStoragePageTitle('Spawner Storage - [1/1]')) === '{"page":1,"total":1}');
+    assert('JSON component title parsed', JSON.stringify(parseStoragePageTitle('{"text":"[4/9] Spawner"}')) === '{"page":4,"total":9}');
+    assert('Marker after other brackets picked', JSON.stringify(parseStoragePageTitle('✦ INFO ✦ «page» [8/12]')) === '{"page":8,"total":12}');
+    assert('No marker returns null', parseStoragePageTitle('Spawner Storage') === null);
+    assert('Empty title returns null', parseStoragePageTitle('') === null);
+    assert('Non-string junk returns null', parseStoragePageTitle(42 as any) === null);
+    assert('Undefined returns null', parseStoragePageTitle(undefined) === null);
+});
+
 // DISCORD BRIDGE PARSING
 await section('Discord Bridge Parsing', async () => {
     assert('Rank + name parsed', JSON.stringify(parseDiscordMessage('[Discord | Staffs] 𑣲Helper | ❥ℬ𝓁𝒶𝓃𝒸 » Miku do you like me')) === '{"username":"❥ℬ𝓁𝒶𝓃𝒸","message":"Miku do you like me"}');
@@ -554,6 +569,19 @@ await section('Discord Bridge Parsing', async () => {
     assert('Bot own echo filtered', own === null, own);
     const vanilla = parseChatMessage('<Steve> hi there', 'miku');
     assert('Vanilla chat still parses', vanilla?.username === 'Steve' && vanilla?.message === 'hi there', vanilla);
+});
+
+// GAZE LOCK ENFORCEMENT MATH (core/gazeLock.ts)
+await section('Gaze Lock Cosine Gate', async () => {
+    assert('Same direction → 1', cosineBetween(1, 0, 0, 5, 0, 0) === 1);
+    assert('Opposite direction → -1', cosineBetween(1, 2, 3, -1, -2, -3) === -1);
+    assert('Perpendicular → 0', cosineBetween(1, 0, 0, 0, 7, 0) === 0);
+    // 30° gate: cos(30°)≈0.866 — baritone's waypoint aim (~150° off the
+    // spawner stare) must be rejected; a tiny drift must pass.
+    const cos30 = Math.cos((30 * Math.PI) / 180);
+    assert('~150° apart rejected (< cos30)', cosineBetween(-0.87, 0.1, 0.48, 0.87, -0.1, -0.48) < cos30);
+    assert('10° drift passes (>= cos30)', Math.cos((10 * Math.PI) / 180) >= cos30);
+    assert('Zero vector treated as aligned', cosineBetween(0, 0, 0, 1, 1, 1) === 1);
 });
 
 console.log(`\n${'═'.repeat(52)}`);

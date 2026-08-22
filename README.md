@@ -112,16 +112,30 @@ commands. The bot can read and click them exactly like a real client:
 | `gsell` | Shortcut: open `/sell` and run the profile's `sell` action |
 | `gspawner` | Open the nearest spawner GUI and dump its layout |
 | `gsdrop` | Spawner GUI → chest button → "drop all" (empties all stored drops) |
+| `gidledrop [on\|off]` | Parked-turret mode: lock onto the spawner and auto-drop forever until toggled off |
 
 GUI behaviour is configured under `config.json → gui.profiles`. A profile
 declares how the window opens, which title identifies it, and named click
 sequences (absolute slots or "first slot whose item matches this
 name/custom-name/lore", with optional shift-click). `gsdrop` verifies the
 drop actually happened — it tries left/shift/right/double-click and reports
-which one emptied the GUI (on many servers the "drop all" button requires a
+which one worked, confirmed by the storage submenu's `[n/m]` page counter
+decreasing in place (on many servers the "drop all" button requires a
 **shift-click**).
 
-**Automatic spawner draining** is available but **off by default**. Set
+Every drop run **locks the bot's gaze on the spawner**: a 0.5s hold before
+the first click, staring through all pages, and a 2s hold after the last —
+a gaze enforcer rewrites any other camera movement during that window, so
+dropped items always fly toward the spawner/water instead of wherever a
+passing player or stray pathfinding glance was pointing.
+
+**Parked-turret mode** (`gui.idleDropMode`, default **on**): right after
+spawn the bot locks itself facing the nearest spawner (place it where you
+want — it never wanders or walks to the spawner), then drops every
+`gui.autoGsdropIntervalSec` seconds until you disable it with `gidledrop
+off` or disconnect. This stands the normal schedulers down while active.
+
+**Scheduled draining** is available but **off by default**. Set
 `"gui.autoGsdrop": true` to have the bot run `gsdrop` on a schedule: once
 20 seconds after joining, then every `gui.autoGsdropIntervalSec` seconds
 (default 300), clearing up to `gui.autoGsdropMaxRounds` chest pages per run
@@ -247,9 +261,11 @@ cp config.json.example config.json
   },
   "gui": {
     "debugWindows": false,
+    "idleDropMode": true,
     "autoGsdrop": false,
     "autoGsdropIntervalSec": 300,
     "autoGsdropMaxRounds": 1,
+    "verboseLogging": false,
     "profiles": {}
   }
 }
@@ -281,9 +297,11 @@ npm start
 | `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
 | `action.retryDelay` | number | Reconnect delay (ms) |
 | `gui.debugWindows` | boolean | Auto-dump every opened GUI window on launch (`gscan on` persists here) |
-| `gui.autoGsdrop` | boolean | Run `gsdrop` on a schedule (default: **false**) |
+| `gui.idleDropMode` | boolean | Parked-turret mode: face the spawner after spawn and auto-drop forever (default: **true**) |
+| `gui.autoGsdrop` | boolean | Run `gsdrop` on a schedule while gidledrop is off (default: **false**) |
 | `gui.autoGsdropIntervalSec` | number | Seconds between automatic drops; first drop fires 20s after join (default: 300, min: 5, invalid → 300) |
 | `gui.autoGsdropMaxRounds` | number | Chest pages to drop per scheduled run; stops early on empty/failure (default: 1, max: 20) |
+| `gui.verboseLogging` | boolean | Trace every camera move with caller attribution, window open/close/clicks, item spawns/pickups — for diagnosing look/click mysteries (default: **false**) |
 | `gui.profiles.*` | object | Chest-GUI profiles: title match, how the window opens, and named click sequences (see "Chest-GUI Automation") |
 
 ---
@@ -370,9 +388,13 @@ gurabott/
 │   ├── utils.ts          # Helper functions (safeGoto, timeouts)
 │   ├── session.ts        # Per-connection lifecycle
 │   ├── web.ts            # Health-check HTTP server
-│   ├── core/
-│   │   └── store.ts      # Event bus + telemetry/log snapshot store
 │   ├── constants.ts      # Shared block/entity name lists
+│   ├── movementAI.ts     # Ambient movement AI (wander, stare, suppression)
+│   ├── stuckDetector.ts  # Physics-based stuck detection
+│   ├── core/
+│   │   ├── store.ts      # Event bus + telemetry/log snapshot store
+│   │   ├── logFile.ts    # JSONL log archiving + retention
+│   │   └── gazeLock.ts   # Camera lock: rewrites bot.look while staring at a target
 │   ├── modules/
 │   │   ├── commands.ts   # All g-command handlers
 │   │   ├── state.ts      # Bot state machine
@@ -381,18 +403,22 @@ gurabott/
 │   │   ├── combat.ts     # Hostile-mob combat & flee controller
 │   │   ├── mining.ts     # Shared mining/tool/pickup helpers
 │   │   ├── water.ts      # Water self-rescue + call-for-help
-│   │   ├── movementAI.ts # Idle/wander behaviors
-│   │   ├── stuckDetector.ts # Physics-based stuck detection
+│   │   ├── gui.ts        # Chest-GUI automation (profiles, spawner drop, autoSell)
+│   │   ├── debugTrace.ts # Opt-in verbose tracer for look/click debugging
+│   │   ├── guardrails.ts # Safety guards on dangerous actions
+│   │   ├── pathRecorder.ts # Records walk routes for sellPath replay
 │   │   ├── ai.ts         # Groq chat integration
 │   │   ├── auth.ts       # AuthMe login automation (command/gui/anvil/dialog/both)
 │   │   ├── connection.ts # Reconnect manager
 │   │   ├── mcp.ts        # MCP server (control the bot from any AI)
 │   │   └── mcpCommands.ts # g-commands exposed as MCP tools
-│   ├── ui/               # OpenTUI renderer (React-style components)
+│   ├── ui/               # OpenTUI renderer (Solid components)
 │   └── types/            # Ambient type declarations
-├── config.json           # Your configuration
+├── config.json           # Your configuration (gitignored)
+├── config.json.example   # Config shape reference
 ├── personality.json      # Character personality
 ├── package.json          # Dependencies
+├── scripts/run.mjs       # Launcher (picks Node runtime, injects flags)
 └── README.md            # This file
 ```
 

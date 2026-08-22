@@ -13,7 +13,7 @@ import { BotState, getState, setState, clearAllControls } from './state.ts';
 import { getMode, setMode, type BotMode } from './mode.ts';
 import { startSurv, stopSurv, isSurvRunning } from './survival.ts';
 import { suppressMovement, resumeMovement, startStare, stopStare } from '../movementAI.ts';
-import { openProfile, runProfileAction, setScanMode, isScanMode, dumpCurrentWindow, getProfileNames, openAndScanBlock, dropFromSpawner } from './gui.ts';
+import { openProfile, runProfileAction, setScanMode, isScanMode, dumpCurrentWindow, getProfileNames, openAndScanBlock, runDropPages, startIdleDrop, stopIdleDrop, isIdleDropActive } from './gui.ts';
 import { replayPath } from './pathRecorder.ts';
 import { BotSession } from '../session.ts';
 import { RESOURCE_GROUPS, DOOR_NAMES, BLOCK_DROPS } from '../constants.ts';
@@ -92,7 +92,8 @@ const commands: Record<string, CommandFn> = {
             'gping, ghelp, gsay, ginv, ginvsee, geat, gjump, gdrop, gwalk, gcr, gcords, gtp',
             'gfollow <player>, gcraft <item>, gdump, gkill <mob|player>, glast, gsfollow',
             'gcollect <wood|stone|dirt> <amount>, gsleep, gopendoor, gscollect, gtab, gfilter, greset',
-            'gscan, gopen <profile>, grun <profile> <action>, gsell, gspawner (open+scan spawner GUI), gsdrop (spawner → chest → drop all)',
+            'gscan, gopen <profile>, grun <profile> <action>, gsell, gspawner (open+scan spawner GUI), gsdrop (stare at spawner, drop all ×autoGsdropMaxRounds)',
+            'gidledrop [on|off] (parked turret mode: only auto-dropping, no movement/looking around)',
             'gpath <route.json> (walk a recorded route), gsellpath <route.json> (route then sell)',
             'gotocord <x> <y> <z>, glook <x> <y> <z> (stare until gidle)',
         ];
@@ -870,8 +871,32 @@ const commands: Record<string, CommandFn> = {
 
     async gsdrop(_ctx, _username, _args) {
         addLog('system', '[GUI] gsdrop — spawner GUI → chest → drop all');
-        const ok = await dropFromSpawner();
+        // Same runner the auto scheduler uses: stares at the spawner through
+        // the whole run (lead hold → pages → tail hold), suppresses idle
+        // movement AI, and drops config.gui.autoGsdropMaxRounds page(s).
+        const ok = await runDropPages();
         addLog('system', `[GUI] gsdrop — ${ok ? 'drop clicked (verify items dropped in-game)' : 'failed (see log)'}`);
+    },
+
+    async gidledrop(_ctx, _username, args) {
+        const arg = (args[0] ?? '').toLowerCase();
+        if (arg === 'off') {
+            reply(stopIdleDrop() ? 'idledrop OFF' : 'idledrop is not on');
+            return;
+        }
+        if (arg === 'on') {
+            reply(startIdleDrop() ? 'idledrop ON — parked at the spawner, dropping only' : 'idledrop failed (see log)');
+            return;
+        }
+        // No arg: toggle.
+        if (isIdleDropActive()) {
+            stopIdleDrop();
+            reply('idledrop OFF');
+        } else {
+            reply(startIdleDrop()
+                ? 'idledrop ON — parked at the spawner, no movement, no looking around, dropping only'
+                : 'idledrop failed (see log — need a spawner within 32 blocks and IDLE/FOLLOWING state)');
+        }
     },
 
     async gotocord({ bot, personality, configureBaritone }, _username, args) {

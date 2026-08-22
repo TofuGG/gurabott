@@ -103,6 +103,12 @@ export interface GuiConfig {
     /** Recorded route (waypoint JSON) walked before opening the shop during an
      *  auto-sell, so the bot reaches a reach-anchored sell spot. */
     sellPath?: string | null;
+    /** Start gidledrop (parked turret: only auto-dropping) right after spawn.
+     *  Defaults to true when unset. */
+    idleDropMode?: boolean;
+    /** Log every camera move, GUI open/close/click, item spawn and pickup,
+     *  with caller attribution for look calls. Defaults to true when unset. */
+    verboseLogging?: boolean;
 }
 
 // ── Pure helpers (unit-tested) ────────────────────────────────────────────────
@@ -126,6 +132,18 @@ export function titleToPlainText(title: unknown): string {
 export function windowMatchesTitle(title: unknown, titleMatch: string[]): boolean {
     const t = titleToPlainText(title).toLowerCase();
     return titleMatch.some((m) => t.includes(m.toLowerCase()));
+}
+
+/** Parse the spawner-storage pagination marker from a submenu title, e.g.
+ *  "Spawner Storage - [3/5]" or "[1/5] SPAWNER STORAGE". Live logs show the
+ *  plugin decrements the SECOND number in place on every dropped page
+ *  ([1/4] → [1/3]) while the first stays put — so treat any decrease of
+ *  either number as a possible drop signal. Returns null when the title has
+ *  no [n/m] marker. Pure — unit-tested. */
+export function parseStoragePageTitle(title: unknown): { page: number; total: number } | null {
+    const m = /\[(\d+)\s*\/\s*(\d+)\]/.exec(titleToPlainText(title));
+    if (!m) return null;
+    return { page: Number(m[1]), total: Number(m[2]) };
 }
 
 const norm = (s: unknown): string => flattenChatComponent(s as any).toLowerCase();
@@ -193,11 +211,10 @@ let configureBaritone: (overrides?: Record<string, any>) => void = () => {};
 
 // Auto-drop state: `lastDropStoredCount` is how many stored drops the most
 // recent dropFromSpawner() round found in the submenu (0 = spawner empty) —
-// the multi-round tick loop stops early on 0. `autoDropRunning` prevents the
-// next setInterval fire from interleaving a second loop between rounds (busy
-// is momentarily false there).
+// the multi-page runDropPages() loop stops early on 0. Overlap between a
+// scheduled tick and a manual gsdrop is handled by `dropRunActive` inside
+// runDropPages() itself.
 let lastDropStoredCount = 0;
-let autoDropRunning = false;
 
 // Auto-sell state: `autoSellRunning` prevents two scheduled runs from
 // overlapping (auto gsdrop and auto sell share the `busy` flag).
@@ -471,7 +488,12 @@ export function initGui(
         busy = false;
         stateIdByWindow.clear();
         lastDropStoredCount = 0;
-        autoDropRunning = false;
+        // A disconnect mid-drop must not leave the reentrancy guard latched,
+        // or every future runDropPages() on the fresh connection no-ops.
+        dropRunActive = false;
+        // gidledrop must not survive a reconnect: its stare target and
+        // suppression belong to the old connection.
+        stopIdleDrop('disconnect');
     });
 }
 
@@ -495,11 +517,12 @@ export function dumpCurrentWindow(): void {
 }
 
 /**
- * Find the nearest `blockName`, walk to it if it's outside interaction reach,
- * right-click it, and wait for any window to open. Returns the window and the
- * block's position (or null on failure). Shared by gspawner (scan) and gsdrop.
+ * Find the nearest `blockName`, walk to it ONLY if it's far beyond interaction
+ * reach, right-click it, and wait for any window to open. Returns the window
+ * and the block's position (or null on failure). Shared by gspawner (scan) and
+ * gsdrop.
  */
-async function openBlockWindow(blockName: string, waitMs: number, approachWithin = 5): Promise<{ window: any; blockPos: Vec3 } | null> {
+async function openBlockWindow(blockName: string, waitMs: number): Promise<{ window: any; blockPos: Vec3 } | null> {
     const b = bot;
     if (!b || !b.entity) return null;
 
@@ -516,12 +539,15 @@ async function openBlockWindow(blockName: string, waitMs: number, approachWithin
         return null;
     }
 
-    // If the block is already within interaction reach (the bot was placed
-    // right in front of it), skip pathfinding entirely — baritone frequently
-    // can't find a route to a spawner on a custom server even when it's only
-    // a few blocks away, and the user's flow is to position the bot by hand.
+    // The user parks the bot by hand at the farm — pathing to an already-
+    // clickable spawner used to burn the full 20s nav deadline every cycle
+    // because baritone's GoalNear(spawner,1) point is unreachable (the goal
+    // sits inside/behind the spawner block). Anything within this server's
+    // proven right-click tolerance goes straight to activation; only genuinely
+    // far blocks justify a walk attempt.
+    const INTERACTION_REACH = 6;
     const dist = block.position.distanceTo(b.entity.position);
-    if (dist > approachWithin) {
+    if (dist > INTERACTION_REACH) {
         addLog('system', `[GUI] walking to ${blockName} at ${block.position.floored()} (${Math.round(dist)} blocks away)`);
         configureBaritone();
         const nav = await safeGoto(
@@ -531,16 +557,22 @@ async function openBlockWindow(blockName: string, waitMs: number, approachWithin
         );
         if (nav.status !== 'success') {
             const still = block.position.distanceTo(b.entity.position);
-            if (still <= 6) {
+            if (still <= INTERACTION_REACH) {
                 addLog('warn', `[GUI] could not get closer to ${blockName} (${nav.status}) — still ${Math.round(still)} blocks away, right-clicking from here`);
             } else {
-                addLog('error', `[GUI] could not reach ${blockName}: ${nav.error?.message ?? nav.status}`);
+                addLog('error', `[GUI] could not reach ${blockName}: ${nav.error?.message ?? nav.status} — place the bot next to it and try again`);
                 return null;
             }
         }
     } else {
         addLog('system', `[GUI] ${blockName} at ${block.position.floored()} is ${Math.round(dist)} block(s) away — right-clicking directly`);
     }
+    // Kill any lingering baritone executor BEFORE interacting with the block:
+    // even after a goto resolves, its PathExecutor can keep ticking and
+    // _walkTo() force-looks at the last walk waypoint every physics tick,
+    // yanking the head off the block mid-interaction (bones then drop toward
+    // the waypoint instead of into the water). stop() is idempotent.
+    try { b.ashfinder?.stop?.(); } catch {}
     const freshBlock = b.blockAt(block.position);
     if (!freshBlock) return null;
 
@@ -664,6 +696,23 @@ function itemDropIdsNear(pos: Vec3 | null, radius: number): Set<number> {
     return ids;
 }
 
+/** Verify the drop via the submenu's pagination title: this server's plugin
+ *  rewrites the title IN PLACE when a page drops. Live logs show the SECOND
+ *  number (total) decrementing while the first stays ([1/4] → [1/3]), so any
+ *  decrease of either number confirms it. Polls until timeout. Only meaningful
+ *  when before.total > 1 — on [1/1] the counter cannot go down. */
+async function verifyDropByTitle(before: { page: number; total: number }, timeoutMs: number): Promise<boolean> {
+    const b = bot;
+    if (!b) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const now = parseStoragePageTitle(b.currentWindow?.title);
+        if (now && (now.page < before.page || now.total < before.total)) return true;
+        await sleep(250);
+    }
+    return false;
+}
+
 /**
  * Send a button click the way a real client does, bypassing mineflayer's
  * global (and possibly stale) stateId and its non-clean cursor encoding. This
@@ -701,6 +750,31 @@ async function clickSlotClean(window: any, slot: number, opts: { mouseButton?: n
     }
 }
 
+/** Ms to hold the initial spawner stare before the first GUI click — gives the
+ *  head time to settle on the block so dropped items fly toward it. */
+export const DROP_GAZE_LEAD_MS = 500;
+/** Ms to keep staring at the spawner AFTER the last drop page lands, so no
+ *  player-glance can rotate the bot while items are still flying. */
+export const DROP_GAZE_TAIL_MS = 2000;
+
+/**
+ * Defense-in-depth against zombie baritone executors: if a path is somehow
+ * still ticking while we're clicking GUI buttons, kill it. PathExecutor._walkTo
+ * force-looks at its walk waypoint every physics tick, which fights the
+ * spawner stare and rotates drops away from the water. Checked before the
+ * chest click and re-asserted before every dropper attempt because a stuck
+ * handler inside baritone can restart a path after our earlier stop().
+ */
+function ensureBaritoneIdle(where: string): void {
+    const b = bot;
+    const af: any = b?.ashfinder;
+    if (!af) return;
+    if (af.isPathing || af.stopped === false) {
+        addLog('warn', `[GUI] ${where}: baritone is still pathing mid-GUI-interaction — stopping it (its _walkTo looks fight the spawner stare)`);
+        try { af.stop(); } catch {}
+    }
+}
+
 /**
  * Manually drop from the spawner GUI (gsdrop), keeping the bot positioned at
  * the spawner the whole time:
@@ -711,10 +785,15 @@ async function clickSlotClean(window: any, slot: number, opts: { mouseButton?: n
  *   4. Verify the stored drops (bones) actually left the GUI — if they're
  *      still there after the click, the drop is reported as failed.
  *
+ * Gaze protocol: once the spawner block is resolved, the bot locks its head on
+ * it (startStare) for a DROP_GAZE_LEAD_MS hold before the first click, keeps
+ * staring through the whole interaction, and holds DROP_GAZE_TAIL_MS after the
+ * drop before releasing the head back to idle behaviors.
+ *
  * Steps are matched by item name rather than hardcoded slots so the command
  * survives layout shifts. Returns true only when the drop is confirmed.
  */
-export async function dropFromSpawner(): Promise<boolean> {
+export async function dropFromSpawner(opts: { tailMs?: number } = {}): Promise<boolean> {
     if (busy) { addLog('warn', '[GUI] busy — wait for the current GUI task to finish'); return false; }
     const b = bot;
     if (!b) return false;
@@ -735,24 +814,40 @@ export async function dropFromSpawner(): Promise<boolean> {
         }
         if (!window) {
             addLog('system', '[GUI] opening the spawner GUI');
-            const opened = await openBlockWindow('spawner', 8000, 2.5);
+            const opened = await openBlockWindow('spawner', 8000);
             if (!opened) return false;
             window = opened.window;
             spawnerPos = opened.blockPos;
         } else {
             // Window reused from a previous run — re-resolve the spawner block
             // so the stare keeps the bot facing it (not the players) through
-            // the drop and the 5s pause after it.
+            // the drop and the post-drop hold.
             spawnerPos = findBlockNamed('spawner', 32)?.position ?? null;
+            if (!spawnerPos) {
+                addLog('warn', '[GUI] reusing the open window but no spawner block is in range — gaze lock skipped, drops may fly the wrong way');
+            }
         }
 
-        // Lock the head on the spawner for the whole interaction + 5s after the
-        // drop. This freezes player-glance/greet/wander behaviors in
-        // movementAI (stareTarget gate) so dropped bones land toward the
-        // water instead of toward whoever walked up to the bot. If the user is
-        // already in a manual glook stare, leave their stare alone.
+        // Lock the head on the spawner for the whole interaction. This freezes
+        // player-glance/greet/wander behaviors in movementAI (stareTarget gate)
+        // so dropped bones land toward the water instead of toward whoever
+        // walked up to the bot. If the user is already in a manual glook
+        // stare, leave their stare alone.
         startedStare = spawnerPos !== null && !isStaring();
-        if (startedStare) startStare(b, spawnerPos!, session!);
+        if (startedStare) {
+            startStare(b, spawnerPos!, session!);
+            // Hold the initial gaze before touching the GUI — bones fly the
+            // way the bot faces, so the head must already be settled.
+            await sleep(DROP_GAZE_LEAD_MS);
+        }
+        // Deterministic facing: don't trust the async stare loop's timing —
+        // snap the head onto the spawner right now so every click below goes
+        // out with the bot physically looking at it. force=true sends the
+        // look immediately instead of waiting for the next physics tick.
+        ensureBaritoneIdle('before the chest click');
+        if (spawnerPos) {
+            await b.lookAt(spawnerPos.offset(0.5, 0.5, 0.5), true).catch(() => {});
+        }
 
         // 2. Click the chest button to reach the drop submenu.
         const chestSlot = findSlotByItemName(window, 'chest');
@@ -769,8 +864,11 @@ export async function dropFromSpawner(): Promise<boolean> {
         }
 
         // 3. Wait for the dropper ("drop all") button. Snapshot the stored
-        // drops (the bones) in the submenu BEFORE clicking, so we can verify
-        // afterwards that "drop all" actually emptied them.
+        // drops (the bones) in the submenu BEFORE clicking, and read the
+        // pagination marker from the title — the plugin decrements the page
+        // counter in place when a page drops (observed [1/4] → [1/3]: the
+        // total decrements), which is the authoritative drop confirmation on
+        // this server.
         const dropSlot = await waitForSlotItem('dropper', 6000);
         if (dropSlot === null) {
             addLog('error', '[GUI] no dropper ("drop all") button appeared after clicking the chest');
@@ -778,6 +876,10 @@ export async function dropFromSpawner(): Promise<boolean> {
             return false;
         }
         const submenu = b.currentWindow;
+        if (!submenu) {
+            addLog('error', '[GUI] the drop submenu closed before its contents could be read');
+            return false;
+        }
         const drops = storedDropSlots(submenu);
         lastDropStoredCount = drops.size;
         if (drops.size === 0) {
@@ -785,13 +887,22 @@ export async function dropFromSpawner(): Promise<boolean> {
         } else {
             addLog('system', `[GUI] stored drops before the drop: ${[...drops.entries()].map(([s, n]) => `slot ${s} (${n})`).join(', ')}`);
         }
+        const pageBefore = parseStoragePageTitle(submenu.title);
+        // The title check needs room to count DOWN — on [1/1] (or a title with
+        // no [n/m] marker at all) it cannot confirm anything, so those cases
+        // keep the legacy verifications (slot clear / item entities).
+        const titleUsable = pageBefore !== null && pageBefore.total > 1;
+        if (pageBefore) {
+            addLog('system', `[GUI] storage pages: ${pageBefore.page}/${pageBefore.total}${titleUsable ? '' : ' — single page, title cannot confirm the drop'}`);
+        } else {
+            addLog('warn', '[GUI] submenu title has no [n/m] page marker — falling back to GUI/entity verification');
+        }
         const itemDropsBefore = itemDropIdsNear(spawnerPos, 8);
 
-        // 4. Try the plausible click interactions until one empties the stored
-        // drops (or item entities appear near the spawner). Plugins bind "drop
-        // all" to different clicks — plain / shift / right / double — and some
-        // servers reject vanilla left-clicks outright, so verify each attempt
-        // against the GUI instead of assuming a click type.
+        // 4. Try the plausible click interactions until one is confirmed.
+        // Plugins bind "drop all" to different clicks — plain / shift / right /
+        // double — and some servers reject vanilla left-clicks outright, so
+        // verify each attempt instead of assuming a click type.
         const attempts = [
             { label: 'left-click', mouseButton: 0, mode: 0 },
             { label: 'shift-click', mouseButton: 0, mode: 1 },
@@ -803,21 +914,46 @@ export async function dropFromSpawner(): Promise<boolean> {
         let workedLabel = '';
         for (const attempt of attempts) {
             addLog('system', `[GUI] attempting ${attempt.label} on the dropper / "drop all" (slot ${dropSlot})`);
+            // Re-assert facing before every attempt: the drop velocity is
+            // derived from the look angles the server sees at click time.
+            // Baritone-idle first — a restarted path would overwrite the look
+            // below with its own force-look within the same tick.
+            ensureBaritoneIdle(`before the ${attempt.label}`);
+            if (spawnerPos) {
+                await b.lookAt(spawnerPos.offset(0.5, 0.5, 0.5), true).catch(() => {});
+            }
             const clicked = await clickSlotClean(submenu, dropSlot, { mouseButton: attempt.mouseButton, mode: attempt.mode });
             if (!clicked) return false;
+
+            // Preferred confirmation: the page counter decrementing in place.
+            if (titleUsable && pageBefore) {
+                if (await verifyDropByTitle(pageBefore, 2000)) {
+                    dropped = true;
+                    const now = parseStoragePageTitle(b.currentWindow?.title);
+                    workedLabel = `${attempt.label} — title ${pageBefore.page}/${pageBefore.total} → ${now ? `${now.page}/${now.total}` : '?'}`;
+                    break;
+                }
+                continue; // title is the authority for multi-page storage — try the next click type
+            }
+
+            // Legacy fallbacks (single-page or unparsed titles).
             dropped = await verifyDropCleared(submenu, drops, 2000);
-            if (dropped) { workedLabel = attempt.label; break; }
+            if (dropped) {
+                workedLabel = `${attempt.label} — stored drops cleared from the GUI`;
+                break;
+            }
             const nowDrops = itemDropIdsNear(spawnerPos, 8);
             const newDrops = [...nowDrops].filter((id) => !itemDropsBefore.has(id)).length;
             if (newDrops > 0) {
                 groundTruth = true;
-                workedLabel = attempt.label;
-                addLog('system', `[GUI] GUI bones unchanged but ${newDrops} new item drop(s) appeared near the spawner — drop executed`);
+                workedLabel = `${attempt.label} — ${newDrops} new item drop(s) near the spawner`;
                 break;
             }
         }
         if (!dropped && !groundTruth) {
-            addLog('error', '[GUI] drop FAILED — none of left/shift/right/double-click emptied the stored drops');
+            addLog('error', titleUsable && pageBefore
+                ? `[GUI] drop FAILED — page counter stayed at ${pageBefore.page}/${pageBefore.total} across left/shift/right/double-click`
+                : '[GUI] drop FAILED — none of left/shift/right/double-click emptied the stored drops');
             if (b.currentWindow) {
                 addLog('system', '[GUI] window contents after the failed drop:');
                 logWindowSlots(b.currentWindow);
@@ -827,9 +963,7 @@ export async function dropFromSpawner(): Promise<boolean> {
         }
         addLog('system', drops.size === 0
             ? '[GUI] no stored drops to verify — done'
-            : groundTruth
-                ? `[GUI] drop confirmed via ${workedLabel} (items appeared near the spawner)`
-                : `[GUI] drop confirmed via ${workedLabel} — stored drops are gone from the GUI`);
+            : `[GUI] drop confirmed via ${workedLabel}`);
 
         // 5. Close the window so the next gsdrop starts from a clean state.
         if (b.currentWindow) {
@@ -838,14 +972,167 @@ export async function dropFromSpawner(): Promise<boolean> {
         return true;
     } finally {
         busy = false;
-        // Keep staring at the spawner for 5s after the drop completes so the
-        // bot doesn't rotate toward a passing player while the dropped items
-        // are still landing (they should fall toward the water, not players).
+        // Keep staring at the spawner after the drop completes so the bot
+        // doesn't rotate toward a passing player while the dropped items are
+        // still landing (they should fall toward the water, not players).
+        // tailMs === 0 means a multi-page run owns the gaze: it holds its own
+        // DROP_GAZE_TAIL_MS once the LAST page is done, then stops the stare.
         if (startedStare) {
-            try { await sleep(5000); } catch {}
-            stopStare(b);
+            const tailMs = opts.tailMs ?? DROP_GAZE_TAIL_MS;
+            if (tailMs > 0) {
+                try { await sleep(tailMs); } catch {}
+                stopStare(b);
+            }
         }
     }
+}
+
+// ── Multi-page drop run (shared by manual gsdrop and the auto scheduler) ─────
+
+// Reentrancy guard: a manual `gsdrop` firing while an auto run is mid-loop (or
+// vice versa) must not interleave two GUI task chains on one `busy` flag.
+let dropRunActive = false;
+
+/**
+ * Drop up to `pages` pages from the spawner, holding the bot's gaze on the
+ * spawner for the WHOLE run: stare → DROP_GAZE_LEAD_MS hold before the first
+ * click (inside dropFromSpawner) → all pages back-to-back without ever
+ * releasing the head → DROP_GAZE_TAIL_MS after the last page → release back to
+ * default idle behaviors.
+ *
+ * The whole run also owns movement via suppressMovement(): movementAI's glance,
+ * greet and wander behaviors are fully suppressed, not just head-gated, so no
+ * idle behavior can move or turn the bot mid-process. Combat flee stays live
+ * on purpose — dying at the spawner to look busy is not a win.
+ *
+ * `pages` defaults to config.gui.autoGsdropMaxRounds so manual `gsdrop` and the
+ * auto scheduler drop the same configured page count. Stops early when a page
+ * fails or the spawner reads empty; returns true when the run ended cleanly
+ * (including "already empty"), false on failure or overlap.
+ */
+export async function runDropPages(pages?: number): Promise<boolean> {
+    if (dropRunActive) { addLog('warn', '[GUI] drop run already active — ignoring overlapping request'); return false; }
+    const b = bot;
+    if (!b) return false;
+    const total = normalizeAutoDropRounds(pages ?? cfg?.autoGsdropMaxRounds);
+
+    dropRunActive = true;
+    suppressMovement(b);
+    let allOk = true;
+    // Capture BEFORE page 1: if a user glook was already running, dropFromSpawner
+    // leaves it alone — and so must our post-run hold (never stop their stare).
+    const ownedGaze = !isStaring();
+    try {
+        for (let page = 1; page <= total; page++) {
+            if (total > 1) addLog('system', `[GUI] gsdrop — page ${page}/${total}`);
+            // tailMs: 0 — this loop owns the gaze across pages; only after the
+            // LAST page does it hold DROP_GAZE_TAIL_MS and stop the stare.
+            const ok = await dropFromSpawner({ tailMs: 0 });
+            if (!ok) {
+                addLog('warn', `[GUI] gsdrop page ${page} failed — stopping this run`);
+                allOk = false;
+                break;
+            }
+            if (lastDropStoredCount === 0) {
+                addLog('system', '[GUI] spawner empty — drop complete');
+                break;
+            }
+        }
+
+        // Post-drop hold: keep facing the spawner while items land, then hand
+        // the head back to default idle behaviors.
+        if (ownedGaze && isStaring()) {
+            try { await sleep(DROP_GAZE_TAIL_MS); } catch {}
+            stopStare(b);
+        }
+        return allOk;
+    } finally {
+        resumeMovement();
+        dropRunActive = false;
+    }
+}
+
+// ── Idle-drop mode (gidledrop) ────────────────────────────────────────────────
+// A parked turret: the bot stands at the spawner farm and does NOTHING except
+// auto-gsdrop on the configured cadence. No movement AI, no player glances,
+// no greet/wander — movement is suppressed for the whole lifetime of the mode
+// and the head is locked on the spawner with a permanent stare.
+
+let idleDropActive = false;
+let idleDropTimer: NodeJS.Timeout | null = null;
+let idleDropHoldsSuppression = false;
+let idleDropOwnsStare = false;
+
+export function isIdleDropActive(): boolean {
+    return idleDropActive;
+}
+
+export function startIdleDrop(): boolean {
+    if (idleDropActive) { addLog('system', '[idledrop] already active'); return true; }
+    const b = bot;
+    const sess = session;
+    if (!b || !sess?.alive) { addLog('warn', '[idledrop] not connected'); return false; }
+    if (getState() !== BotState.IDLE && getState() !== BotState.FOLLOWING) {
+        addLog('warn', `[idledrop] refused — state is ${getState()} (needs IDLE or FOLLOWING)`);
+        return false;
+    }
+    const pos = findBlockNamed('spawner', 32)?.position ?? null;
+    if (!pos) {
+        addLog('warn', '[idledrop] no spawner block within 32 blocks — stand next to the farm and retry');
+        return false;
+    }
+
+    idleDropActive = true;
+
+    // Own movement for the mode's lifetime: glance/greet/wander off and the
+    // stuck detector stands down (suppressed > 0). Nothing may walk or turn
+    // the bot while it's parked here.
+    suppressMovement(b);
+    idleDropHoldsSuppression = true;
+
+    // Permanent gaze on the spawner. If a manual glook was already running,
+    // leave it alone (it owns the head) but remember we didn't start ours.
+    idleDropOwnsStare = !isStaring();
+    if (idleDropOwnsStare) startStare(b, pos, sess);
+
+    addLog('system', `[idledrop] ON — parked at ${pos.floored()}, dropping every ${normalizeAutoDropIntervalSec(cfg?.autoGsdropIntervalSec)}s`);
+
+    const loop = async (): Promise<void> => {
+        if (!idleDropActive) return;
+        try {
+            // Page count from cfg.autoGsdropMaxRounds; runDropPages' own guard
+            // keeps an overlapping tick from interleaving.
+            await runDropPages();
+        } catch (err: any) {
+            addLog('warn', `[idledrop] drop run errored: ${err?.message ?? err}`);
+        }
+        if (!idleDropActive) return;
+        idleDropTimer = setTimeout(() => { void loop(); }, normalizeAutoDropIntervalSec(cfg?.autoGsdropIntervalSec) * 1000);
+    };
+    // First run ~2s after enabling so the command reply lands first.
+    idleDropTimer = setTimeout(() => { void loop(); }, 2000);
+    return true;
+}
+
+export function stopIdleDrop(reason?: string): boolean {
+    if (!idleDropActive) return false;
+    // Stop scheduling synchronously so no new run starts after this point.
+    idleDropActive = false;
+    if (idleDropTimer) { clearTimeout(idleDropTimer); idleDropTimer = null; }
+    addLog('system', `[idledrop] OFF${reason ? ` (${reason})` : ''}`);
+
+    void (async () => {
+        // Let an in-flight drop run finish first: releasing mid-run would let
+        // dropFromSpawner start a fresh stare nobody would ever stop, and
+        // yank the head during a click.
+        while (dropRunActive && bot) await sleep(250);
+        const b = bot;
+        if (b && idleDropHoldsSuppression) resumeMovement();
+        idleDropHoldsSuppression = false;
+        if (b && idleDropOwnsStare && isStaring()) stopStare(b);
+        idleDropOwnsStare = false;
+    })();
+    return true;
 }
 
 // ── Auto gsdrop (configurable cadence) ───────────────────────────────────────
@@ -892,11 +1179,12 @@ export function normalizeAutoDropRounds(value: unknown): number {
 /**
  * Start the auto-gsdrop scheduler: one drop 20s after join, then every
  * autoGsdropIntervalSec seconds up to autoGsdropMaxRounds back-to-back drop
- * cycles (the same action as typing `gsdrop` repeatedly), stopping early when
- * a cycle fails or finds the spawner empty. Disabled entirely when
+ * pages (the same action as typing `gsdrop` repeatedly), stopping early when
+ * a page fails or finds the spawner empty. Disabled entirely when
  * config.gui.autoGsdrop is false. Timers are pushed into `intervals[]` so a
  * disconnect/end clears them with every other connection-owned interval;
- * `autoDropRunning` keeps an overlapping tick from interleaving a second loop.
+ * runDropPages()'s own guard keeps an overlapping tick (or a manual gsdrop)
+ * from interleaving a second run.
  */
 export function startAutoDropSpawner(opts: { intervals: NodeJS.Timeout[] }): void {
     const { intervals } = opts;
@@ -908,8 +1196,8 @@ export function startAutoDropSpawner(opts: { intervals: NodeJS.Timeout[] }): voi
 
     const run = (): void => {
         if (cfg?.autoGsdrop === false) return;
+        if (isIdleDropActive()) return; // gidledrop owns dropping while it's on
         if (busy) { addLog('warn', '[auto] gsdrop skipped — GUI busy'); return; }
-        if (autoDropRunning) return; // previous tick's drain loop still going
         const b = bot;
         if (!b?.entity || (b.health ?? 0) <= 0) {
             addLog('warn', '[auto] gsdrop skipped — bot not ready (dead/not connected)');
@@ -921,28 +1209,11 @@ export function startAutoDropSpawner(opts: { intervals: NodeJS.Timeout[] }): voi
             return;
         }
 
-        const maxRounds = normalizeAutoDropRounds(cfg?.autoGsdropMaxRounds);
         addLog('system', '[auto] gsdrop — scheduled task fired');
-        void (async () => {
-            autoDropRunning = true;
-            try {
-                for (let round = 1; round <= maxRounds; round++) {
-                    if (maxRounds > 1) addLog('system', `[auto] gsdrop — page ${round}/${maxRounds}`);
-                    const ok = await dropFromSpawner();
-                    if (!ok) {
-                        addLog('warn', `[auto] gsdrop page ${round} failed — stopping this run`);
-                        return;
-                    }
-                    if (lastDropStoredCount === 0) {
-                        addLog('system', '[auto] spawner empty — auto drop complete');
-                        return;
-                    }
-                }
-                addLog('system', `[auto] dropped ${maxRounds} page(s) — any remainder waits for the next tick`);
-            } finally {
-                autoDropRunning = false;
-            }
-        })();
+        // runDropPages resolves the page count from cfg.autoGsdropMaxRounds,
+        // owns the spawner gaze for the whole run (stare → pages → tail hold)
+        // and guards its own reentrancy via dropRunActive.
+        void runDropPages();
     };
 
     intervals.push(setTimeout(run, AUTO_DROP_FIRST_DELAY_MS));

@@ -176,6 +176,10 @@ export async function loadConfig(rl: readline.Interface): Promise<BotConfig> {
         if (config.gui.autoGsdropIntervalSec === undefined) config.gui.autoGsdropIntervalSec = 300;
         if (config.gui.autoGsdropMaxRounds === undefined) config.gui.autoGsdropMaxRounds = 1;
         if (config.gui.autoSell === undefined) config.gui.autoSell = true;
+        if (config.gui.idleDropMode === undefined) config.gui.idleDropMode = true;
+        // Diagnosis of the drop-direction bug is done — ships quiet; set
+        // gui.verboseLogging=true to re-attach the [DBG] tracer.
+        if (config.gui.verboseLogging === undefined) config.gui.verboseLogging = false;
         // Persist the backfilled config so bot.ts's loadJson() (which re-reads
         // the file from disk) sees the same fixes instead of a stale legacy
         // file that still crashes createBot (e.g. missing action.retryDelay).

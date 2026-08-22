@@ -80,6 +80,14 @@ export async function safeGoto(
         return nav ?? { status: 'failed', error: new Error('no result') };
     } catch (e) {
         return { status: 'failed', error: e };
+    } finally {
+        // Guarantee the executor is dead on EVERY exit path, not just timeouts:
+        // goto() can RESOLVE (success or its own failed status) while its
+        // PathExecutor keeps ticking — _walkTo force-looks at the last walk
+        // waypoint every physics tick and would fight any explicit lookAt()
+        // that follows (e.g. the spawner stare during gsdrop). stop() is
+        // idempotent and nothing in this repo listens for 'stopped'.
+        try { bot?.ashfinder?.stop?.(); } catch {}
     }
 }
 

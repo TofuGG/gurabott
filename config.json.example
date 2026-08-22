@@ -37,13 +37,15 @@
     "retryDelay": 5000
   },
   "gui": {
-    "//": "debugWindows dumps every opened GUI window. autoGsdrop drains the spawner drop chest automatically (off by default): first drop 20s after join, then every autoGsdropIntervalSec seconds, up to autoGsdropMaxRounds chest pages per tick (stops early when empty). autoSell runs the shop profile's sell action every 30 minutes; sellPath optionally walks a recorded route first.",
+    "//": "debugWindows dumps every opened GUI window. idleDropMode (default true) starts gidledrop — parked turret, only auto-dropping — right after spawn (retries while chunks load; falls back to the scheduler if no spawner is found). autoGsdrop drains the spawner drop chest automatically (off by default): first drop 20s after join, then every autoGsdropIntervalSec seconds, up to autoGsdropMaxRounds chest pages per tick (stops early when empty); it stands down while gidledrop is active. autoGsdropMaxRounds also sets how many pages a manual `gsdrop` drops. Every drop run locks the bot's gaze on the spawner: 0.5s hold before the first click, staring through all pages, 2s after the last. verboseLogging (default false) traces every camera move with caller attribution, window open/close/clicks, item spawns and pickups — enable it when diagnosing look/click mysteries. A page counts as dropped when the submenu's [n/m] title counter decreases in place (single-page storage falls back to slot/entity checks). autoSell runs the shop profile's sell action every 30 minutes; sellPath optionally walks a recorded route first.",
     "debugWindows": false,
     "autoGsdrop": false,
     "autoGsdropIntervalSec": 300,
     "autoGsdropMaxRounds": 1,
     "autoSell": true,
     "sellPath": null,
+    "idleDropMode": true,
+    "verboseLogging": false,
     "profiles": {
       "shop": {
         "titleMatch": ["sell", "shop"],

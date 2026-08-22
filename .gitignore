@@ -9,7 +9,7 @@ config.json.bak
 allowedUser.json
 command-history.json
 .env
-.env.local
+.env.*
 
 # Build & Output
 dist/
@@ -77,6 +77,11 @@ AGENTS.md
 
 # Local AI tooling (opencode plugin + vendored deps)
 .opencode/
+
+# Local AI tooling (Claude Code / agents)
+.claude/
+.agents/
+CLAUDE.md
 
 # Generated knowledge graph (regenerate with `graphify update .`)
 graphify-out/

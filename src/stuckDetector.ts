@@ -39,19 +39,13 @@ export function startStuckDetector(bot: Bot, setEscaping?: (v: boolean) => void,
             return;
         }
 
-        // Ignore deliberate idle pauses: movementAI's stand_look / scheduling
-        // gaps are SUPPOSED to keep the bot still. Only treat it as stuck when
-        // the bot is actively pathing or a task/command owns movement.
-        if (getState() === BotState.IDLE && !bot.ashfinder?.isPathing) {
-            stuckTicks = 0;
-            return;
-        }
-
-        // A command/task owns movement (collect, survival, combat, flee): the
-        // pause is deliberate (digging, looting, strafing). Don't hijack it —
-        // those tasks have their own failure handling, and the escape would
-        // fight their active baritone path.
-        if (isMovementSuppressed() || session?.moveActive) {
+        // Idle mode is deliberately stationary (stand/greet/stare) — never
+        // treat stillness as stuck, even if a stale baritone flag says
+        // "pathing" after a failed nav. An escape here would sprint the bot
+        // around and dig to a "safe spot" while it's supposed to be standing
+        // still. Short task navigations that run under IDLE (GUI opens) are
+        // covered by baritone's own goto deadline instead.
+        if (getState() === BotState.IDLE) {
             stuckTicks = 0;
             return;
         }

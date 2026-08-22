@@ -16,7 +16,9 @@ import { handleCommand, type CommandContext } from './modules/commands.ts';
 import { initGuardrails, isGuardrailsEnabled } from './modules/guardrails.ts';
 import { initReconnect, resetReconnectAttempts, triggerReconnect, setDisconnecting } from './modules/connection.ts';
 import { initAuth } from './modules/auth.ts';
-import { initGui, startAutoDropSpawner, startAutoSell } from './modules/gui.ts';
+import { initGui, startAutoDropSpawner, startAutoSell, startIdleDrop, isIdleDropActive } from './modules/gui.ts';
+import { attachDebugTracer } from './modules/debugTrace.ts';
+import { installGazeEnforcer } from './core/gazeLock.ts';
 import { installProtocolFix } from './protocolFix.ts';
 import { startStuckDetector } from './stuckDetector.ts';
 import { startMovementAI, resetMovementSuppression } from './movementAI.ts';
@@ -770,6 +772,39 @@ export function createBot(
 
         // ── Auto gsell (30-minute cadence, sells inventory via /sell) ───────
         startAutoSell({ intervals });
+
+        // ── Gaze enforcer (always on, not a debug flag): while a stare is
+        // active, any look deviating >30° from the stare target is rewritten
+        // to it — baritone's executor resurrects after every stop() and its
+        // _walkTo force-looks would otherwise rotate the head mid-drop.
+        // Installed BEFORE the tracer so [DBG] lines show caller intent and
+        // [GAZE] lines show what was actually sent.
+        installGazeEnforcer(bot, (fn) => session?.onEnd(fn));
+
+        // ── Verbose tracer (gui.verboseLogging): every look/window/click/item ──
+        if ((CONFIG.gui as any)?.verboseLogging !== false) {
+            attachDebugTracer(bot, (fn) => session?.onEnd(fn));
+        }
+
+        // ── gidledrop by default (gui.idleDropMode): parked turret at the farm ──
+        // findBlockNamed needs nearby chunks loaded, which takes a few seconds
+        // after spawn — try, then back off and retry before giving up and
+        // leaving the normal auto-gsdrop scheduler in charge.
+        if ((CONFIG.gui as any)?.idleDropMode !== false) {
+            const tries = [8_000, 20_000, 35_000];
+            const attempt = (i: number): void => {
+                const t = setTimeout(() => {
+                    session?.untrack(t);
+                    if (!spawned || !session?.alive) return;
+                    if (isIdleDropActive()) return;
+                    if (startIdleDrop()) return;
+                    if (i + 1 < tries.length) attempt(i + 1);
+                    else addLog('warn', '[idledrop] no spawner found after retries — falling back to the regular gsdrop scheduler');
+                }, tries[i]);
+                session?.track(t);
+            };
+            attempt(0);
+        }
 
         startMovementAI(bot, () => getState(), configureBaritone, HOSTILE_MOBS, session!, () => isEscapingStuck, getMode);
         addLog('system', '[BOT] Movement AI started');
