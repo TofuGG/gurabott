@@ -1,15 +1,18 @@
 {
+  "//": "Copy this file to config.json and fill in your values. Lines starting with \"//\" are comments and are ignored by the bot.",
   "client": {
     "host": "SERVER_ADDRESS",
     "port": "PORT",
     "username": "USERNAME"
   },
   "ai": {
+    "//": "Optional Groq API key enables AI chat; without it the bot is command-only.",
     "enabled": false,
     "apiKey": "YOUR_GROQ_API",
     "maxTokens": 150
   },
   "auth": {
+    "//": "AuthMe login automation. mode: command | gui | anvil | dialog | both.",
     "enabled": false,
     "password": "",
     "mode": "command",
@@ -25,6 +28,7 @@
   "behaviorMode": "idle",
   "guardrails": true,
   "mcp": {
+    "//": "Streamable HTTP MCP server so any AI can drive the bot remotely.",
     "enabled": true,
     "host": "127.0.0.1",
     "port": 5400
@@ -33,8 +37,11 @@
     "retryDelay": 5000
   },
   "gui": {
+    "//": "debugWindows dumps every opened GUI window. autoGsdrop drains the spawner drop chest automatically (off by default): first drop 20s after join, then every autoGsdropIntervalSec seconds, up to autoGsdropMaxRounds chest pages per tick (stops early when empty). autoSell runs the shop profile's sell action every 30 minutes; sellPath optionally walks a recorded route first.",
     "debugWindows": false,
-    "autoGsdrop": true,
+    "autoGsdrop": false,
+    "autoGsdropIntervalSec": 300,
+    "autoGsdropMaxRounds": 1,
     "autoSell": true,
     "sellPath": null,
     "profiles": {

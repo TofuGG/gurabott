@@ -765,7 +765,7 @@ export function createBot(
             waterHelpMessages: (PERSONALITY as any).messages?.waterHelp ?? [],
         });
 
-        // ── Auto gsdrop (30-minute cadence, drains the spawner) ─────────────
+        // ── Auto gsdrop (20s after join, then every gui.autoGsdropIntervalSec) ──
         startAutoDropSpawner({ intervals });
 
         // ── Auto gsell (30-minute cadence, sells inventory via /sell) ───────

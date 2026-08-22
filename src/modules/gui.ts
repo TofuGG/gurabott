@@ -87,9 +87,16 @@ export interface GuiProfileConfig {
 export interface GuiConfig {
     debugWindows: boolean;
     profiles: Record<string, GuiProfileConfig>;
-    /** Run the 30-minute auto gsdrop (spawner → chest → drop all) until the
-     *  spawner is empty. Defaults to on when unset. */
+    /** Periodically drop from the spawner GUI (gsdrop): once 20s after join,
+     *  then every autoGsdropIntervalSec seconds. Off unless explicitly
+     *  enabled (a missing key counts as disabled). */
     autoGsdrop?: boolean;
+    /** Seconds between automatic gsdrop runs. Invalid/missing values fall
+     *  back to 300 (5 min); values below the 5s minimum are clamped up. */
+    autoGsdropIntervalSec?: number;
+    /** How many drop cycles (submenu pages) to clear back-to-back on each
+     *  scheduled gsdrop run. Defaults to 1; clamped to [1, 20]. */
+    autoGsdropMaxRounds?: number;
     /** Run the 30-minute auto gsell (shop profile "sell" action). Defaults to
      *  on when unset. */
     autoSell?: boolean;
@@ -185,8 +192,10 @@ let busy = false;
 let configureBaritone: (overrides?: Record<string, any>) => void = () => {};
 
 // Auto-drop state: `lastDropStoredCount` is how many stored drops the most
-// recent dropFromSpawner() round found in the submenu (0 = spawner empty), and
-// `autoDropRunning` prevents two scheduled runs from overlapping.
+// recent dropFromSpawner() round found in the submenu (0 = spawner empty) —
+// the multi-round tick loop stops early on 0. `autoDropRunning` prevents the
+// next setInterval fire from interleaving a second loop between rounds (busy
+// is momentarily false there).
 let lastDropStoredCount = 0;
 let autoDropRunning = false;
 
@@ -839,77 +848,105 @@ export async function dropFromSpawner(): Promise<boolean> {
     }
 }
 
-// ── Auto gsdrop (30-minute cadence) ──────────────────────────────────────────
+// ── Auto gsdrop (configurable cadence) ───────────────────────────────────────
 
-export const AUTO_DROP_INTERVAL_MS = 30 * 60 * 1000;
 export const AUTO_DROP_FIRST_DELAY_MS = 20 * 1000;
 export const AUTO_SELL_INTERVAL_MS = 30 * 60 * 1000;
 export const AUTO_SELL_FIRST_DELAY_MS = 15 * 1000;
 
-/**
- * Drain the spawner's drop chest until it's empty (the 30-minute auto task).
- *
- * The submenu can hold 2–3 pages of stored drops, so one drop cycle may not
- * clear everything: each `dropFromSpawner()` round re-opens the root GUI and
- * re-enters the chest submenu, and reports how many stored drops it found. A
- * round that finds zero means the spawner is drained; otherwise we run again,
- * capped at `maxRounds` so an unexpected pagination layout can't loop forever.
- *
- * Each round is logged with the `[auto]` tag so automated runs are
- * distinguishable from manual `[SHELL] gsdrop` invocations.
- */
-export async function autoDropFromSpawner(maxRounds = 6): Promise<void> {
-    if (autoDropRunning) { addLog('warn', '[auto] gsdrop already running — skipping'); return; }
-    if (busy) { addLog('warn', '[auto] gsdrop skipped — GUI busy'); return; }
-    const b = bot;
-    if (!b?.entity || (b.health ?? 0) <= 0) {
-        addLog('warn', '[auto] gsdrop skipped — bot not ready (dead/not connected)');
-        return;
-    }
-    const state = getState();
-    if (state !== BotState.IDLE && state !== BotState.FOLLOWING) {
-        addLog('warn', `[auto] gsdrop skipped — state is ${state}, waiting for the next tick`);
-        return;
-    }
+/** Default seconds between automatic gsdrop runs when config doesn't say. */
+export const AUTO_DROP_DEFAULT_INTERVAL_SEC = 300;
+/** Floor for autoGsdropIntervalSec — a typo like `"intervalSec": 0` must not
+ *  turn the scheduler into a click-spam loop against the server. */
+export const AUTO_DROP_MIN_INTERVAL_SEC = 5;
+/** Default drop cycles per scheduled run when config doesn't say. */
+export const AUTO_DROP_DEFAULT_ROUNDS = 1;
+/** Ceiling for autoGsdropMaxRounds — a server whose submenu pagination never
+ *  reads empty must not keep the loop (and the GUI) busy forever. */
+export const AUTO_DROP_MAX_ROUNDS = 20;
 
-    autoDropRunning = true;
-    try {
-        for (let round = 1; round <= maxRounds; round++) {
-            addLog('system', `[auto] gsdrop — round ${round}`);
-            const ok = await dropFromSpawner();
-            if (!ok) {
-                addLog('warn', `[auto] gsdrop round ${round} failed — stopping`);
-                return;
-            }
-            if (lastDropStoredCount === 0) {
-                addLog('system', '[auto] spawner empty — auto drop complete');
-                return;
-            }
-            addLog('system', `[auto] round ${round} dropped ${lastDropStoredCount} item(s) — more may remain, retrying`);
-        }
-        addLog('warn', `[auto] reached ${maxRounds} rounds without confirming empty — stopping (possible pagination issue)`);
-    } finally {
-        autoDropRunning = false;
+/**
+ * Normalize config.gui.autoGsdropIntervalSec: missing/invalid/non-positive
+ * values fall back to the default, and anything below the minimum is clamped
+ * up to it. Pure — unit-tested.
+ */
+export function normalizeAutoDropIntervalSec(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return AUTO_DROP_DEFAULT_INTERVAL_SEC;
     }
+    return Math.max(AUTO_DROP_MIN_INTERVAL_SEC, Math.floor(value));
 }
 
 /**
- * Start the 30-minute auto-gsdrop scheduler: one run shortly after spawn, then
- * every AUTO_DROP_INTERVAL_MS. Timers are pushed into `intervals[]` so a
- * disconnect/end clears them with every other connection-owned interval.
+ * Normalize config.gui.autoGsdropMaxRounds (drop cycles per scheduled run):
+ * missing/invalid/non-positive values fall back to 1, fractions are floored,
+ * and anything above the cap is clamped down. Pure — unit-tested.
+ */
+export function normalizeAutoDropRounds(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return AUTO_DROP_DEFAULT_ROUNDS;
+    }
+    return Math.min(AUTO_DROP_MAX_ROUNDS, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * Start the auto-gsdrop scheduler: one drop 20s after join, then every
+ * autoGsdropIntervalSec seconds up to autoGsdropMaxRounds back-to-back drop
+ * cycles (the same action as typing `gsdrop` repeatedly), stopping early when
+ * a cycle fails or finds the spawner empty. Disabled entirely when
+ * config.gui.autoGsdrop is false. Timers are pushed into `intervals[]` so a
+ * disconnect/end clears them with every other connection-owned interval;
+ * `autoDropRunning` keeps an overlapping tick from interleaving a second loop.
  */
 export function startAutoDropSpawner(opts: { intervals: NodeJS.Timeout[] }): void {
     const { intervals } = opts;
+    if (cfg?.autoGsdrop === false) {
+        addLog('system', '[auto] gsdrop disabled by config');
+        return;
+    }
+    const intervalMs = normalizeAutoDropIntervalSec(cfg?.autoGsdropIntervalSec) * 1000;
 
     const run = (): void => {
         if (cfg?.autoGsdrop === false) return;
         if (busy) { addLog('warn', '[auto] gsdrop skipped — GUI busy'); return; }
+        if (autoDropRunning) return; // previous tick's drain loop still going
+        const b = bot;
+        if (!b?.entity || (b.health ?? 0) <= 0) {
+            addLog('warn', '[auto] gsdrop skipped — bot not ready (dead/not connected)');
+            return;
+        }
+        const state = getState();
+        if (state !== BotState.IDLE && state !== BotState.FOLLOWING) {
+            addLog('warn', `[auto] gsdrop skipped — state is ${state}`);
+            return;
+        }
+
+        const maxRounds = normalizeAutoDropRounds(cfg?.autoGsdropMaxRounds);
         addLog('system', '[auto] gsdrop — scheduled task fired');
-        void autoDropFromSpawner();
+        void (async () => {
+            autoDropRunning = true;
+            try {
+                for (let round = 1; round <= maxRounds; round++) {
+                    if (maxRounds > 1) addLog('system', `[auto] gsdrop — page ${round}/${maxRounds}`);
+                    const ok = await dropFromSpawner();
+                    if (!ok) {
+                        addLog('warn', `[auto] gsdrop page ${round} failed — stopping this run`);
+                        return;
+                    }
+                    if (lastDropStoredCount === 0) {
+                        addLog('system', '[auto] spawner empty — auto drop complete');
+                        return;
+                    }
+                }
+                addLog('system', `[auto] dropped ${maxRounds} page(s) — any remainder waits for the next tick`);
+            } finally {
+                autoDropRunning = false;
+            }
+        })();
     };
 
     intervals.push(setTimeout(run, AUTO_DROP_FIRST_DELAY_MS));
-    intervals.push(setInterval(run, AUTO_DROP_INTERVAL_MS));
+    intervals.push(setInterval(run, intervalMs));
 }
 
 /**

@@ -121,6 +121,13 @@ drop actually happened — it tries left/shift/right/double-click and reports
 which one emptied the GUI (on many servers the "drop all" button requires a
 **shift-click**).
 
+**Automatic spawner draining** is available but **off by default**. Set
+`"gui.autoGsdrop": true` to have the bot run `gsdrop` on a schedule: once
+20 seconds after joining, then every `gui.autoGsdropIntervalSec` seconds
+(default 300), clearing up to `gui.autoGsdropMaxRounds` chest pages per run
+(default 1, max 20). Each run stops early when a drop fails or the spawner
+reads empty, so leftover pages simply wait for the next tick.
+
 ### 🔍 Utility Commands
 | Command | Function |
 |---------|----------|
@@ -191,7 +198,8 @@ the bot uses the system Node.
 `↑/↓` walk history, Enter runs, `Ctrl+C` exits unconditionally, and `Esc`
 clears the prompt — on an empty prompt `Esc` asks for confirmation first
 (`Esc` again to quit, any other key to cancel), so it never kills the bot
-by accident.
+by accident. Command history persists across restarts in the gitignored
+`command-history.json`, so `↑` recalls commands from previous sessions too.
 
 ### Installation
 
@@ -239,6 +247,9 @@ cp config.json.example config.json
   },
   "gui": {
     "debugWindows": false,
+    "autoGsdrop": false,
+    "autoGsdropIntervalSec": 300,
+    "autoGsdropMaxRounds": 1,
     "profiles": {}
   }
 }
@@ -270,6 +281,9 @@ npm start
 | `mcp.*` | object | MCP server settings (default: 127.0.0.1:5400) |
 | `action.retryDelay` | number | Reconnect delay (ms) |
 | `gui.debugWindows` | boolean | Auto-dump every opened GUI window on launch (`gscan on` persists here) |
+| `gui.autoGsdrop` | boolean | Run `gsdrop` on a schedule (default: **false**) |
+| `gui.autoGsdropIntervalSec` | number | Seconds between automatic drops; first drop fires 20s after join (default: 300, min: 5, invalid → 300) |
+| `gui.autoGsdropMaxRounds` | number | Chest pages to drop per scheduled run; stops early on empty/failure (default: 1, max: 20) |
 | `gui.profiles.*` | object | Chest-GUI profiles: title match, how the window opens, and named click sequences (see "Chest-GUI Automation") |
 
 ---

@@ -1,8 +1,12 @@
 // TUI interaction tests — verify the footer command prompt (typing, submit,
 // history, Esc clear/exit, Ctrl+C exit) using OpenTUI's virtual test renderer.
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { testRender } from '@opentui/solid';
 import { App } from './ui/app.tsx';
 import { addLog } from './core/store.ts';
+import { loadHistory } from './ui/history.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -124,6 +128,76 @@ await flush();
 mockInput.pressCtrlC();
 await flush();
 assert('Ctrl+C exits with text present', exits === 2, exits, 2);
+
+console.log('\n── TUI Command History Persistence ──');
+
+// A fresh renderer with a fresh history file must start with an empty ring.
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gura-history-'));
+const histFile = path.join(tmpDir, 'history.json');
+
+const setup2 = await testRender(
+    () => <App
+        serverInfo="127.0.0.1:25565 · Bot"
+        historyFile={histFile}
+        onCommand={(c, a) => { calls.push([c, a]); }}
+        onExit={() => { exits++; }}
+    />,
+    { width: 100, height: 24 },
+);
+const { mockInput: mock2, flush: flush2, captureCharFrame: frame2 } = setup2;
+const footerLine2 = () => {
+    const lines = frame2().split('\n');
+    return lines[lines.length - 2] ?? '';
+};
+await flush2();
+assert('Fresh history file starts empty', !footerLine2().includes('persist-me'));
+
+// Submit a command — it must land on disk for the next session.
+await mock2.typeText('persist-me arg');
+await flush2();
+mock2.pressEnter();
+await flush2();
+const onDisk = loadHistory(histFile);
+assert('Submitted command persisted to disk', onDisk.includes('persist-me arg'), onDisk);
+
+// A brand-new renderer (new session) pointing at the same file must recall it.
+setup2.renderer.destroy();
+const setup3 = await testRender(
+    () => <App
+        serverInfo="127.0.0.1:25565 · Bot"
+        historyFile={histFile}
+        onCommand={(c, a) => { calls.push([c, a]); }}
+        onExit={() => { exits++; }}
+    />,
+    { width: 100, height: 24 },
+);
+const { mockInput: mock3, flush: flush3, captureCharFrame: frame3 } = setup3;
+const footerLine3 = () => {
+    const lines = frame3().split('\n');
+    return lines[lines.length - 2] ?? '';
+};
+await flush3();
+mock3.pressArrow('up');
+await flush3();
+assert('New session recalls persisted command via ↑', footerLine3().includes('persist-me arg'), footerLine3());
+
+// Persistence must survive a corrupt/missing file (best-effort, no crash).
+setup3.renderer.destroy();
+fs.writeFileSync(histFile, '{ not json');
+const setup4 = await testRender(
+    () => <App
+        serverInfo="127.0.0.1:25565 · Bot"
+        historyFile={histFile}
+        onCommand={(c, a) => { calls.push([c, a]); }}
+        onExit={() => { exits++; }}
+    />,
+    { width: 100, height: 24 },
+);
+const { flush: flush4 } = setup4;
+await flush4();
+assert('Corrupt history file does not crash', true);
+setup4.renderer.destroy();
+fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${'═'.repeat(52)}`);
 console.log(`TUI Results: ${totalPass} passed, ${totalFail} failed / ${totalPass + totalFail} total`);

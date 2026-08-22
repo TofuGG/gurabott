@@ -5,7 +5,7 @@ import { parseAIReply, parseDirectedVerdict, buildDirectedSystemPrompt } from '.
 import { sleep, getRandom, isTpaCommand, containsProfanity, extractTpaSender, typingDelayMs, flattenChatComponent, parseQuizLine, stripChatTimestamps, detectPromptInjection, isTabInternalTeam, resolvePlayerTeamName, resolveSelfTeamFromSidebar, handleChatChicken, INITIAL_CHICKEN_STATE, parseChatMessage, parseDiscordMessage, formatLogTime } from './utils.ts';
 import { initReconnect, triggerReconnect, resetReconnectAttempts } from './modules/connection.ts';
 import { buildRunFileName, formatLogLine, KEEP_LAST_N } from './core/logFile.ts';
-import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates } from './modules/gui.ts';
+import { titleToPlainText, windowMatchesTitle, itemMatches, findSlotByItem, blockNameCandidates, normalizeAutoDropIntervalSec, normalizeAutoDropRounds, AUTO_DROP_FIRST_DELAY_MS } from './modules/gui.ts';
 
 let totalPass = 0, totalFail = 0;
 
@@ -505,6 +505,37 @@ await section('Chest-GUI Automation', async () => {
     assert('Modern spawner matches both names', JSON.stringify(blockNameCandidates('spawner')) === '["spawner","mob_spawner"]');
     assert('Legacy spawner matches both names', JSON.stringify(blockNameCandidates('mob_spawner')) === '["spawner","mob_spawner"]');
     assert('Non-spawner block single candidate', JSON.stringify(blockNameCandidates('chest')) === '["chest"]');
+});
+
+// AUTO-GSDROP INTERVAL CONFIG (pure helper from gui.ts)
+await section('Auto-gsdrop Interval Config', async () => {
+    assert('Missing falls back to 300', normalizeAutoDropIntervalSec(undefined) === 300);
+    assert('Null falls back to 300', normalizeAutoDropIntervalSec(null) === 300);
+    assert('String falls back to 300', normalizeAutoDropIntervalSec('600' as any) === 300);
+    assert('NaN falls back to 300', normalizeAutoDropIntervalSec(NaN) === 300);
+    assert('Infinity falls back to 300', normalizeAutoDropIntervalSec(Infinity) === 300);
+    assert('Negative falls back to 300', normalizeAutoDropIntervalSec(-5) === 300);
+    assert('Zero falls back to 300', normalizeAutoDropIntervalSec(0) === 300);
+    assert('Valid value passthrough', normalizeAutoDropIntervalSec(600) === 600);
+    assert('Fractional floors', normalizeAutoDropIntervalSec(10.9) === 10);
+    assert('Sub-minimum clamped up', normalizeAutoDropIntervalSec(1) === 5);
+    assert('Tiny fraction clamped up', normalizeAutoDropIntervalSec(0.5) === 5);
+    assert('First drop fires 20s after join', AUTO_DROP_FIRST_DELAY_MS === 20 * 1000, AUTO_DROP_FIRST_DELAY_MS, 20000);
+});
+
+// AUTO-GSDROP ROUNDS CONFIG (pure helper from gui.ts)
+await section('Auto-gsdrop Rounds Config', async () => {
+    assert('Missing falls back to 1', normalizeAutoDropRounds(undefined) === 1);
+    assert('Null falls back to 1', normalizeAutoDropRounds(null) === 1);
+    assert('String falls back to 1', normalizeAutoDropRounds('3' as any) === 1);
+    assert('NaN falls back to 1', normalizeAutoDropRounds(NaN) === 1);
+    assert('Infinity falls back to 1', normalizeAutoDropRounds(Infinity) === 1);
+    assert('Negative falls back to 1', normalizeAutoDropRounds(-2) === 1);
+    assert('Zero falls back to 1', normalizeAutoDropRounds(0) === 1);
+    assert('Valid rounds passthrough', normalizeAutoDropRounds(3) === 3);
+    assert('Fractional floors', normalizeAutoDropRounds(2.7) === 2);
+    assert('Over-cap clamped down to 20', normalizeAutoDropRounds(50) === 20);
+    assert('Tiny fraction floors then clamps to min 1', normalizeAutoDropRounds(0.5) === 1);
 });
 
 // DISCORD BRIDGE PARSING

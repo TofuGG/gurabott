@@ -7,6 +7,7 @@ pnpm-lock.yaml
 config.json
 config.json.bak
 allowedUser.json
+command-history.json
 .env
 .env.local
 

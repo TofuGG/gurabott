@@ -18,6 +18,7 @@
 import { useKeyboard } from '@opentui/solid';
 import { onMount } from 'solid-js/dist/solid.js';
 import { theme } from './theme.ts';
+import { loadHistory, saveHistory } from './history.ts';
 
 type AnyInput = { value: string; placeholder: string; focus: () => void };
 
@@ -25,9 +26,10 @@ const HISTORY_LIMIT = 100;
 const DEFAULT_PLACEHOLDER = 'Type a command — e.g. ghelp, status, quit';
 const CONFIRM_PLACEHOLDER = 'Press ESC again to confirm exit — any other key cancels';
 
-export function Footer(props: { onCommand: (cmd: string, args: string[]) => void | Promise<void>; onExit: () => void }) {
+export function Footer(props: { onCommand: (cmd: string, args: string[]) => void | Promise<void>; onExit: () => void; historyFile?: string }) {
     let inputEl: AnyInput | null = null;
-    const history: string[] = [];
+    // Seed the ring from disk so ↑/↓ recall commands from previous sessions.
+    const history: string[] = loadHistory(props.historyFile);
     let histIdx = -1;
     let confirmExit = false;
 
@@ -50,6 +52,7 @@ export function Footer(props: { onCommand: (cmd: string, args: string[]) => void
         history.push(trimmed);
         if (history.length > HISTORY_LIMIT) history.shift();
         histIdx = -1;
+        saveHistory(history, props.historyFile);
 
         const parts = trimmed.split(/\s+/);
         void props.onCommand(parts[0], parts.slice(1));

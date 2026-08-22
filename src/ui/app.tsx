@@ -19,7 +19,7 @@ import { theme } from './theme.ts';
 
 export type CommandHandler = (cmd: string, args: string[]) => void | Promise<void>;
 
-export function App(props: { serverInfo: string; onCommand: CommandHandler; onExit: () => void }) {
+export function App(props: { serverInfo: string; onCommand: CommandHandler; onExit: () => void; historyFile?: string }) {
     // Ctrl+C exits unconditionally — even mid-typing. Global key listeners run
     // before the focused input processes the key, so this fires reliably.
     useKeyboard((key) => {
@@ -50,7 +50,7 @@ export function App(props: { serverInfo: string; onCommand: CommandHandler; onEx
         <box flexDirection="column" width="100%" height="100%" style={{ backgroundColor: theme.background }}>
             <Header serverInfo={props.serverInfo} />
             <Scrollback />
-            <Footer onCommand={props.onCommand} onExit={props.onExit} />
+            <Footer onCommand={props.onCommand} onExit={props.onExit} historyFile={props.historyFile} />
         </box>
     );
 }
